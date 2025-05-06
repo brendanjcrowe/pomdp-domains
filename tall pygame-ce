@@ -1,0 +1,20 @@
+Help on package gymnasium.envs in gymnasium:
+
+NNAAMMEE
+    gymnasium.envs - Registers the internal gym envs then loads the env plugins for module using the entry point.
+
+PPAACCKKAAGGEE  CCOONNTTEENNTTSS
+    box2d (package)
+    classic_control (package)
+    mujoco (package)
+    phys2d (package)
+    registration
+    tabular (package)
+    toy_text (package)
+
+DDAATTAA
+    rreeggiissttrryy = {'Acrobot-v1': EnvSpec(id='Acrobot-v1', entry_point='gymnas...
+
+FFIILLEE
+    /home/brendan/miniconda3/envs/SetTransformer/lib/python3.11/site-packages/gymnasium/envs/__init__.py
+

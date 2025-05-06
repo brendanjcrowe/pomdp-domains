@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 from pdomains import *
 
 env=gym.make('pdomains-ant-tag-v0', rendering=True)
-env.reset()
+obs, info = env.reset()
 
 for i in range(1000):
     action = env.action_space.sample()
-    env.step(action)
-    if i % 10 == 0:
-        env.reset()
+    obs, reward, terminated, truncated, info = env.step(action)
+    if terminated or truncated or i % 10 == 0:
+        obs, info = env.reset()

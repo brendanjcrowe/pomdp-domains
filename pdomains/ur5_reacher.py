@@ -1,11 +1,12 @@
 import time
-import numpy as np
-from mujoco_py import load_model_from_path, MjSim, MjViewer
-import gym
-from gym import spaces
 from pathlib import Path
-from gym.utils import seeding
+
 import gin
+import gymnasium as gym
+import numpy as np
+from gymnasium import spaces
+from gymnasium.utils import seeding
+from mujoco_py import MjSim, MjViewer, load_model_from_path
 
 ASSETS_PATH = Path(__file__).resolve().parent / 'assets'
 

@@ -170,7 +170,8 @@ class BoxEnv(gym.Env):
 
         self._update_state()
 
-        return self._get_obs()
+        # Updated for gymnasium: return observation and info
+        return self._get_obs(), {}
 
     def step(self, action):
         """
@@ -199,10 +200,13 @@ class BoxEnv(gym.Env):
             else:
                 env_reward = -5.0
 
-        if self.x_g >= self.x_g_right_limit or self.x_g <= self.x_g_left_limit or env_reward >= 0.0:
             done = True
 
-        return self._get_obs(), env_reward, done, {}
+        # Updated for gymnasium: split done into terminated and truncated
+        terminated = done
+        truncated = False
+
+        return self._get_obs(), env_reward, terminated, truncated, {}
 
     def _get_obs(self):
         

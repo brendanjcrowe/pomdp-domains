@@ -114,7 +114,8 @@ class AntTagEnv(gym.Env):
 
         self.sim.step()
 
-        return self._get_obs(False)
+        # Updated for gymnasium: return observation and info
+        return self._get_obs(False), {}
 
     def _move_target(self, ant_pos, current_target_pos):
         target2ant_vec = ant_pos - current_target_pos
@@ -183,7 +184,11 @@ class AntTagEnv(gym.Env):
 
         reveal_target_pos = self._do_reveal_target()
 
-        return self._get_obs(reveal_target_pos), env_reward, done, {}
+        # Updated for gymnasium: split done into terminated and truncated
+        terminated = done
+        truncated = False
+
+        return self._get_obs(reveal_target_pos), env_reward, terminated, truncated, {}
 
 
     def seed(self, seed=None):

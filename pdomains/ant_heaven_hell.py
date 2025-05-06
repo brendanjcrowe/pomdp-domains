@@ -129,8 +129,8 @@ class AntEnv(gym.Env):
             
         self.sim.step()
 
-        # Return state
-        return self._get_obs(False, at_reset=True)
+        # Updated for gymnasium: return observation and info
+        return self._get_obs(False, at_reset=True), {}
 
     def _do_reveal_target(self):
 
@@ -174,7 +174,11 @@ class AntEnv(gym.Env):
 
         reveal_heaven_direction = self._do_reveal_target()
 
-        return self._get_obs(reveal_heaven_direction), env_reward, done, {}
+        # Updated for gymnasium: split done into terminated and truncated
+        terminated = done
+        truncated = False
+
+        return self._get_obs(reveal_heaven_direction), env_reward, terminated, truncated, {}
 
     def seed(self, seed=None):
         self.np_random, seed_ = seeding.np_random(seed)

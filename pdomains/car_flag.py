@@ -6,8 +6,15 @@ import gin
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.envs.classic_control import rendering as visualize
 from gymnasium.utils import seeding
+
+# In gymnasium, rendering is moved from classic_control to a separate module
+try:
+    # Try the new location first
+    from gymnasium.envs.classic_control import rendering as visualize
+except ImportError:
+    # Fall back to new location in recent gymnasium versions
+    from gymnasium.rendering import rendering as visualize
 
 
 @gin.configurable
@@ -123,7 +130,11 @@ class CarEnv(gym.Env):
         if self.show:
             self.render()
 
-        return self.state, env_reward, done, {}
+        # Updated for gymnasium: split done into terminated and truncated
+        terminated = done
+        truncated = False
+
+        return self.state, env_reward, terminated, truncated, {}
 
     def render(self, mode='human'):
         self._setup_view()
@@ -150,7 +161,9 @@ class CarEnv(gym.Env):
             self._draw_boundary()
 
         self.state = np.array([self.np_random.uniform(low=-0.2, high=0.2), 0, 0.0])
-        return np.array(self.state)
+        
+        # Updated for gymnasium: return observation and info
+        return np.array(self.state), {}
 
     def _height(self, xs):
         return .55 * np.ones_like(xs)
