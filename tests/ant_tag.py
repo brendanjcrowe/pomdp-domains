@@ -1,6 +1,7 @@
-from pdomains import *
+import gymnasium as gym
 import matplotlib.pyplot as plt
-import gym
+
+from pdomains import *
 
 env=gym.make('pdomains-ant-tag-v0', rendering=True)
 env.reset()

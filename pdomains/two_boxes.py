@@ -1,10 +1,12 @@
 import operator
 from pathlib import Path
-import gym
-import numpy as np
-from gym import spaces
-from gym.utils import seeding
+
+import gymnasium as gym
 import mujoco_py
+import numpy as np
+from gymnasium import spaces
+from gymnasium.utils import seeding
+
 
 class BoxEnv(gym.Env):
 

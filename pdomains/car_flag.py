@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 
-import numpy as np
-import gin
-import gym
-from gym import spaces
-from gym.utils import seeding
 import socket
-from gym.envs.classic_control import rendering as visualize
+
+import gin
+import gymnasium as gym
+import numpy as np
+from gymnasium import spaces
+from gymnasium.envs.classic_control import rendering as visualize
+from gymnasium.utils import seeding
+
 
 @gin.configurable
 class CarEnv(gym.Env):
