@@ -3,10 +3,11 @@ from pathlib import Path
 
 import gin
 import gymnasium as gym
+import mujoco
+import mujoco.viewer
 import numpy as np
 from gymnasium import spaces
 from gymnasium.utils import seeding
-from mujoco_py import MjSim, MjViewer, load_model_from_path
 
 ASSETS_PATH = Path(__file__).resolve().parent / 'assets'
 
@@ -69,16 +70,16 @@ class UR5Env(gym.Env):
         MODEL_PATH = ASSETS_PATH / self.name
 
         # Create Mujoco Simulation
-        self.model = load_model_from_path(str(MODEL_PATH))
-        self.sim = MjSim(self.model)
+        self.model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
+        self.data = mujoco.MjData(self.model)
 
         self.switch_threshold = 0.2
 
         # Set dimensions and ranges of states, actions, and goals in order to configure actor/critic networks
         self.extra_dim = 6
-        self.obs_dim = len(self.sim.data.qpos) + len(self.sim.data.qvel) + self.extra_dim # State will include (i) joint angles and coordinate of the target position
-        self.action_dim = len(self.sim.model.actuator_ctrlrange) # low-level action dim
-        self.action_bounds = self.sim.model.actuator_ctrlrange[:,1] # low-level action bounds
+        self.obs_dim = len(self.data.qpos) + len(self.data.qvel) + self.extra_dim # State will include (i) joint angles and coordinate of the target position
+        self.action_dim = len(self.model.actuator_ctrlrange) # low-level action dim
+        self.action_bounds = self.model.actuator_ctrlrange[:,1].copy() # low-level action bounds
 
         self.action_offset = np.zeros((len(self.action_bounds))) # Assumes symmetric low-level action ranges
         self.subgoal_dim = len(subgoal_bounds)
@@ -106,14 +107,15 @@ class UR5Env(gym.Env):
 
         # Implement visualization if necessary
         self.visualize = rendering  # Visualization boolean
+        self.viewer = None
         if self.visualize:
-            self.viewer = MjViewer(self.sim)
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
         self.num_frames_skip = num_frames_skip
 
         # For Gym interface
         self.action_space = spaces.Box(
-            low=np.array(self.sim.model.actuator_ctrlrange[:,0]),
-            high=np.array(self.sim.model.actuator_ctrlrange[:,1]),
+            low=np.array(self.model.actuator_ctrlrange[:,0]),
+            high=np.array(self.model.actuator_ctrlrange[:,1]),
             dtype=np.float32
         )
 
@@ -176,7 +178,7 @@ class UR5Env(gym.Env):
 
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, target_pos, current_wrist_pos):
-        return np.concatenate((self.sim.data.qpos, self.sim.data.qvel, current_wrist_pos, target_pos))
+        return np.concatenate((self.data.qpos, self.data.qvel, current_wrist_pos, target_pos))
 
     # Reset simulation to state within initial state specified by user
     def reset(self):
@@ -226,18 +228,18 @@ class UR5Env(gym.Env):
 
 
         # Set initial joint positions and velocities
-        for i in range(len(self.sim.data.qpos)):
-            self.sim.data.qpos[i] = np.random.uniform(self.initial_state_space[i][0],self.initial_state_space[i][1])
+        for i in range(len(self.data.qpos)):
+            self.data.qpos[i] = np.random.uniform(self.initial_state_space[i][0],self.initial_state_space[i][1])
 
-        for i in range(len(self.sim.data.qvel)):
-            self.sim.data.qvel[i] = np.random.uniform(self.initial_state_space[len(self.sim.data.qpos) + i][0],self.initial_state_space[len(self.sim.data.qpos) + i][1])
+        for i in range(len(self.data.qvel)):
+            self.data.qvel[i] = np.random.uniform(self.initial_state_space[len(self.data.qpos) + i][0],self.initial_state_space[len(self.data.qpos) + i][1])
 
-        self.sim.step()
+        mujoco.mj_step(self.model, self.data)
 
-        current_wrist_pos = self._angles2jointpos(self.sim.data.qpos)[2]
+        current_wrist_pos = self._angles2jointpos(self.data.qpos)[2]
 
         # Not reveal the target info at reset
-        return self._get_obs(np.zeros_like(self.target_pos), current_wrist_pos)
+        return self._get_obs(np.zeros_like(self.target_pos), current_wrist_pos), {}
 
     # Execute low-level action for number of frames specified by num_frames_skip
     def step(self, action):
@@ -248,17 +250,20 @@ class UR5Env(gym.Env):
 
         if self.visualize:
             self.display_target_pos()
-            self.display_joint_pos()
-            self.display_switch()
 
-        self.sim.data.ctrl[:] = action
+        self.data.ctrl[:] = action
 
         for _ in range(self.num_frames_skip):
-            self.sim.step()
-            if self.visualize:
-                self.viewer.render()
+            mujoco.mj_step(self.model, self.data)
+            if self.visualize and self.viewer is not None:
+                if self.viewer.is_running():
+                    self.viewer.sync()
+                else:
+                    # Relaunch viewer if it was closed
+                    self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                    self.viewer.sync()
 
-        current_wrist_pos = self._angles2jointpos(self.sim.data.qpos)[2]
+        current_wrist_pos = self._angles2jointpos(self.data.qpos)[2]
 
         dist2switch = np.linalg.norm(current_wrist_pos - self.switch_pos)
 
@@ -292,30 +297,61 @@ class UR5Env(gym.Env):
         else:
             env_reward = -1
 
-        self.done = (reward > 0.0)
-        self.solved = self.done
+        terminated = (reward > 0.0) # Goal achieved
+        truncated = (self.steps_cnt >= self.max_ep_len)
+        
+        self.solved = terminated # 'solved' usually means goal achieved
 
-        return self._get_obs(target_pos, current_wrist_pos), env_reward, done, {"is_success": self.solved}
+        # The info dictionary can remain the same or be expanded
+        info = {"is_success": self.solved} 
 
-    # display the region around the switch
+        return self._get_obs(target_pos, current_wrist_pos), env_reward, terminated, truncated, info
+
+    def is_done(self):
+        # check if the current wrist pos is close to the target pos
+        current_wrist_pos = self._angles2jointpos(self.data.qpos)[2]
+
+        if np.linalg.norm(current_wrist_pos - self.target_pos) < self.end_goal_thresholds:
+            print(f"Episode finished after {self.steps_cnt} steps, success")
+            self.solved = True
+            return True
+
+        if self.steps_cnt >= self.max_ep_len:
+            # print(f"Episode finished after {self.steps_cnt} steps, failed")
+            return True
+        
+        return False
+
+    def calc_reward(self, current_wrist_pos):
+
+        dist_to_target = np.linalg.norm(current_wrist_pos - self.target_pos)
+
+        if dist_to_target < self.end_goal_thresholds:
+            # print("Solved!")
+            return 0
+        else:
+            return -1
+            # return -np.abs(dist_to_target)/100
+
     def display_switch(self):
-        self.sim.data.mocap_pos[1] = self.switch_pos 
+        self.data.site_xpos[0] = self.switch_pos
 
     def display_subgoals(self, subgoals):
-        angle = subgoals[0][:3] # only take the angles out
-        joint_pos = self._angles2jointpos(angle)
 
-        for j in range(3):
-            self.sim.data.mocap_pos[2 + j] = joint_pos[j]
+        colors = [[1,0,0,0.5],[0,1,0,0.5],[0,0,1,0.5]]
+
+        for i in range(len(subgoals)):
+            self.model.geom_pos[self.model.geom_name2id("subgoal_"+str(i+1))] = self._angles2jointpos(subgoals[i])[2]
+            self.model.geom_rgba[self.model.geom_name2id("subgoal_"+str(i+1))] = colors[i%len(colors)]
 
     def display_joint_pos(self):
-        joint_pos = self._angles2jointpos(self.sim.data.qpos)
-
-        for j in range(3):
-            self.sim.data.mocap_pos[5 + j] = joint_pos[j]
+        # for i in range(3):
+        #     self.sim.data.site_xpos[i+4] = self._angles2jointpos(self.sim.data.qpos)[i]
+        pass
 
     def display_target_pos(self):
-        self.sim.data.mocap_pos[0] = self.target_pos
+        # self.sim.data.site_xpos[1] = self.target_pos_true
+        self.data.site_xpos[1] = self.target_pos
 
     def seed(self, seed=None):
         self.np_random, seed_ = seeding.np_random(seed)

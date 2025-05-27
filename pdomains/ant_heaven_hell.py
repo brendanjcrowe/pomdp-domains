@@ -3,10 +3,11 @@ import time
 from pathlib import Path
 
 import gymnasium as gym
+import mujoco
+import mujoco.viewer
 import numpy as np
 from gymnasium import spaces
 from gymnasium.utils import seeding
-from mujoco_py import MjSim, MjViewer, load_model_from_path
 
 ASSETS_PATH = Path(__file__).resolve().parent / 'assets'
 
@@ -34,20 +35,21 @@ class AntEnv(gym.Env):
         MODEL_PATH = ASSETS_PATH / self.name
 
         # Create Mujoco Simulation
-        self.model = load_model_from_path(str(MODEL_PATH))
-        self.sim = MjSim(self.model)
+        self.model = mujoco.MjModel.from_xml_path(str(MODEL_PATH))
+        self.data = mujoco.MjData(self.model)
 
-        self.state_dim = len(self.sim.data.qpos) + len(self.sim.data.qvel) + 1 # State will include (i) joint angles and (ii) joint velocities, extra info
-        self.action_dim = len(self.sim.model.actuator_ctrlrange) # low-level action dim
-        self.action_bounds = self.sim.model.actuator_ctrlrange[:,1] # low-level action bounds
+        self.state_dim = len(self.data.qpos) + len(self.data.qvel) + 1 # State will include (i) joint angles and (ii) joint velocities, extra info
+        self.action_dim = len(self.model.actuator_ctrlrange) # low-level action dim
+        self.action_bounds = self.model.actuator_ctrlrange[:,1].copy() # low-level action bounds
         self.action_offset = np.zeros((len(self.action_bounds))) # Assumes symmetric low-level action ranges
 
         self.initial_state_space = initial_state_space
 
         # Implement visualization if necessary
         self.visualize = rendering  # Visualization boolean
+        self.viewer = None
         if self.visualize:
-            self.viewer = MjViewer(self.sim)
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
         self.num_frames_skip = num_frames_skip
 
         # For Gym interface
@@ -69,8 +71,8 @@ class AntEnv(gym.Env):
         self.priest_pos = [0.0, 6.0]
         self.radius = 2.0
 
-        self.left_id = self.model.site_name2id('left_area')
-        self.right_id = self.model.site_name2id('right_area')
+        self.left_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'left_area')
+        self.right_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'right_area')
 
         self.json_writer = None
         self.list_pos = []
@@ -80,31 +82,31 @@ class AntEnv(gym.Env):
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, reveal_heaven_direction, at_reset=False):
         if at_reset:
-            return np.concatenate((self.sim.data.qpos, self.sim.data.qvel, np.zeros(1)))
+            return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(1)))
 
         heaven_direction = self.heaven_direction * np.ones(1) if reveal_heaven_direction else np.zeros(1)
 
-        return np.concatenate((self.sim.data.qpos, self.sim.data.qvel, heaven_direction))
+        return np.concatenate((self.data.qpos, self.data.qvel, heaven_direction))
 
     # Reset simulation to state within initial state specified by user
     def reset(self):
 
         # Reset controls
-        self.sim.data.ctrl[:] = 0
+        self.data.ctrl[:] = 0
 
         # Set initial joint positions and velocities
-        for i in range(len(self.sim.data.qpos)):
-            self.sim.data.qpos[i] = self.np_random.uniform(self.initial_state_space[i][0],self.initial_state_space[i][1])
+        for i in range(len(self.data.qpos)):
+            self.data.qpos[i] = self.np_random.uniform(self.initial_state_space[i][0],self.initial_state_space[i][1])
 
-        for i in range(len(self.sim.data.qvel)):
-            self.sim.data.qvel[i] = self.np_random.uniform(self.initial_state_space[len(self.sim.data.qpos) + i][0],self.initial_state_space[len(self.sim.data.qpos) + i][1])
+        for i in range(len(self.data.qvel)):
+            self.data.qvel[i] = self.np_random.uniform(self.initial_state_space[len(self.data.qpos) + i][0],self.initial_state_space[len(self.data.qpos) + i][1])
 
         # Initialize ant's position
-        self.sim.data.qpos[0] = self.np_random.uniform(-1.0, 1.0)
-        self.sim.data.qpos[1] = self.np_random.uniform(0.0, 1.0)
+        self.data.qpos[0] = self.np_random.uniform(-1.0, 1.0)
+        self.data.qpos[1] = self.np_random.uniform(0.0, 1.0)
 
         # Randomize the side of heaven
-        coin_face = self.np_random.rand() >= 0.5
+        coin_face = self.np_random.random() >= 0.5
 
         # -1: heaven on left, 1: heaven on the right
         self.heaven_pos = self.heaven_hell[coin_face]
@@ -118,23 +120,23 @@ class AntEnv(gym.Env):
             # print("Heaven on the right")
 
             # heaven on the right 
-            self.sim.model.site_rgba[self.right_id] = GREEN
-            self.sim.model.site_rgba[self.left_id] = RED
+            self.model.site_rgba[self.right_id] = GREEN
+            self.model.site_rgba[self.left_id] = RED
         else:
             # print("Heaven on the left")
 
             # heaven on the left
-            self.sim.model.site_rgba[self.left_id] = GREEN
-            self.sim.model.site_rgba[self.right_id] = RED
+            self.model.site_rgba[self.left_id] = GREEN
+            self.model.site_rgba[self.right_id] = RED
             
-        self.sim.step()
+        mujoco.mj_step(self.model, self.data)
 
         # Updated for gymnasium: return observation and info
         return self._get_obs(False, at_reset=True), {}
 
     def _do_reveal_target(self):
 
-        ant_pos = self.sim.data.qpos[:2]
+        ant_pos = self.data.qpos[:2]
 
         d2priest = np.linalg.norm(ant_pos - self.priest_pos)
         if (d2priest < self.radius):
@@ -147,13 +149,17 @@ class AntEnv(gym.Env):
     # Execute low-level action for number of frames specified by num_frames_skip
     def step(self, action):
 
-        self.sim.data.ctrl[:] = action
+        self.data.ctrl[:] = action
         for _ in range(self.num_frames_skip):
-            self.sim.step()
-            if self.visualize:
-                self.viewer.render()
+            mujoco.mj_step(self.model, self.data)
+            if self.visualize and self.viewer is not None:
+                if self.viewer.is_running():
+                    self.viewer.sync()
+                else:
+                    self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                    self.viewer.sync()
 
-        ant_pos = self.sim.data.qpos[:2]
+        ant_pos = self.data.qpos[:2]
 
         d2heaven = np.linalg.norm(ant_pos - self.heaven_pos)
 

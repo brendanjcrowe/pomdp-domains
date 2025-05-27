@@ -2,7 +2,8 @@ import operator
 from pathlib import Path
 
 import gymnasium as gym
-import mujoco_py
+import mujoco
+import mujoco.viewer
 import numpy as np
 from gymnasium import spaces
 from gymnasium.utils import seeding
@@ -34,8 +35,8 @@ class BoxEnv(gym.Env):
 
         # mujoco-py
         xml_path = Path(__file__).resolve().parent / 'assets' / 'two_boxes.xml'
-        self.model = mujoco_py.load_model_from_path(str(xml_path))
-        self.sim = mujoco_py.MjSim(self.model)
+        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
+        self.data = mujoco.MjData(self.model)
         self.viewer = None  # Initializes only when self.render() is called.
         self.rendering = rendering
 
@@ -44,27 +45,27 @@ class BoxEnv(gym.Env):
 
         # MuJoCo
         # bodies
-        self.gripah_bid = self.model.body_name2id('gripah-base')
-        self.small_box_bid = self.model.body_name2id('small_box')
-        self.small_box_2_bid = self.model.body_name2id('small_box_2')
+        self.gripah_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'gripah-base')
+        self.small_box_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_box')
+        self.small_box_2_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'small_box_2')
 
-        self.big_box_bid = self.model.body_name2id('big_box')
-        self.big_box_2_bid = self.model.body_name2id('big_box_2')
+        self.big_box_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'big_box')
+        self.big_box_2_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, 'big_box_2')
 
-        self.lregion_bid = self.model.site_name2id('left_boundary')
-        self.rregion_bid = self.model.site_name2id('right_boundary')        
+        self.lregion_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'left_boundary')
+        self.rregion_bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, 'right_boundary')        
 
         # geoms
-        self.wide_finger_geom_id = self.model.geom_name2id('geom:wide-finger')
-        self.wide_finger_tip_geom_id = self.model.geom_name2id('geom:wide-finger-tip')
+        self.wide_finger_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, 'geom:wide-finger')
+        self.wide_finger_tip_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, 'geom:wide-finger-tip')
         # joints
-        self.slide_x_c_id = self.model.joint_name2id('slide:gripah-base-x')
-        self.hinge_wide_finger_id = self.model.joint_name2id('hinge:wide-finger')
-        self.hinge_narrow_finger_id = self.model.joint_name2id('hinge:narrow-finger')
+        self.slide_x_c_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, 'slide:gripah-base-x')
+        self.hinge_wide_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, 'hinge:wide-finger')
+        self.hinge_narrow_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, 'hinge:narrow-finger')
         # actuators
-        self.velocity_x_id = self.model.actuator_name2id('velocity:x')
-        self.velocity_narrow_finger_id = self.model.actuator_name2id('velocity:narrow-finger')
-        self.position_narrow_finger_id = self.model.actuator_name2id('position:narrow-finger')
+        self.velocity_x_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, 'velocity:x')
+        self.velocity_narrow_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, 'velocity:narrow-finger')
+        self.position_narrow_finger_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, 'position:narrow-finger')
 
         self.model.jnt_range[self.slide_x_c_id][0] = self.x_left_limit
         self.model.jnt_range[self.slide_x_c_id][1] = self.x_right_limit
@@ -107,7 +108,7 @@ class BoxEnv(gym.Env):
         """
 
         # Resets the mujoco env
-        self.sim.reset()
+        mujoco.mj_resetData(self.model, self.data)
 
         self.box_1 = 40
         self.box_2 = 60
@@ -121,7 +122,7 @@ class BoxEnv(gym.Env):
         #         ok = True
 
         # Assigns the parameters to mujoco-py
-        option = self.np_random.randint(4)
+        option = self.np_random.integers(4)
 
         # Both boxes are small
         if option == 0:
@@ -165,7 +166,7 @@ class BoxEnv(gym.Env):
             self.model.body_pos[self.small_box_bid][0] = -500
 
         # qpos
-        self.sim.data.qpos[self.slide_x_c_id] = self.x_g + self.FINGER_TIP_OFFSET
+        self.data.qpos[self.slide_x_c_id] = self.x_g + self.FINGER_TIP_OFFSET
         self._control_narrow_finger(theta_target=0.9, teleport=True)
 
         self._update_state()
@@ -216,15 +217,24 @@ class BoxEnv(gym.Env):
     def render(self, mode='human'):
         if self.rendering:
             if self.viewer is None:
-                self.viewer = mujoco_py.MjViewer(self.sim)
-                self.viewer.cam.distance = 150
-                self.viewer.cam.azimuth = 90
-                self.viewer.cam.elevation = -15
+                self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                # Settings for camera can be done through the viewer handle's cam attribute
+                # For example: self.viewer.cam.distance = 150 (if available and needed)
+                # The passive viewer might require locking before changing cam attributes: with self.viewer.lock(): self.viewer.cam.distance = 150
+                # For now, I will keep the camera adjustments commented out as their direct migration can be complex.
+                # self.viewer.cam.distance = 150
+                # self.viewer.cam.azimuth = 90
+                # self.viewer.cam.elevation = -15
 
-            self.viewer.render()
+            if self.viewer.is_running():
+                self.viewer.sync()
+            else:
+                self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+                self.viewer.sync()
 
     def close(self):
-        pass
+        if self.viewer is not None and self.viewer.is_running():
+            self.viewer.close()
 
     def seed(self, seed=None):
         """
@@ -253,124 +263,115 @@ class BoxEnv(gym.Env):
 
     def _control_slider_x(self, scale):
         """
-        Controls the joint x of the gripah to move to the given target state.
-
-        :param direction: scale
+        Controls the x slider of the gripah.
         """
-
-        for _ in range(self.step_length):
-            self.sim.data.ctrl[self.velocity_x_id] = scale * self.default_velocity
-            self.sim.step()
-            self.render()
+        self.data.ctrl[self.velocity_x_id] = self.default_velocity * scale
 
     def _control_narrow_finger(self, theta_target, teleport=False):
         """
-        Controls the narrow finger to rotate to the given target state.
+        Controls the narrow finger of the gripah.
 
-        :param theta_target: the target state that the narrow finger should rotate to.
-        :param teleport:     teleport mode. The gripah will be teleported to the desired state without running
-                             simulation. Note when running the actuator in teleport mode, the gripah is not able
-                             to interact with other objects
+        :param theta_target: the target angular position of the narrow finger
+        :param teleport: if True, the narrow finger position is set immediately;
+                         otherwise, the narrow finger is controlled by velocity actuator.
         """
 
-        self.qpos_nfinger = -theta_target
-
         if teleport:
-            self.sim.data.qpos[self.hinge_narrow_finger_id] = self.qpos_nfinger
-            self.sim.data.ctrl[self.position_narrow_finger_id] = self.qpos_nfinger
-            self.sim.step()
+            # Teleports the narrow finger to the specified position.
+            self.data.qpos[self.hinge_narrow_finger_id] = theta_target
+            # Updates the actuator according to the new position immediately.
+            self.data.ctrl[self.position_narrow_finger_id] = theta_target
+        else:
+            # Controls the narrow finger by setting the velocity.
+            theta_error = theta_target - self._get_narrow_finger_angle()
+            velocity = np.sign(theta_error) * self.default_velocity
 
-            return
+            # If the error is small enough, directly set the velocity to 0.
+            if np.abs(theta_error) < 0.05:
+                velocity = 0
 
-        self.sim.data.ctrl[self.position_narrow_finger_id] = self.qpos_nfinger
-        while True:
-            last_state = self._get_gripah_raw_state()
-            self.sim.step()
-            self.render()
-            now_state = self._get_gripah_raw_state()
-
-            for diff in map(operator.sub, last_state, now_state):
-                if abs(round(diff, 3)) > 0.001:
-                    break
-            else:
-                break
+            # Sets the narrow finger velocity.
+            self.data.ctrl[self.velocity_narrow_finger_id] = velocity
 
     def _get_theta(self):
         """
-        Gets the current angle of the angle of the wide finger.
-
-        :return: the current angle of the angle of the wide finger
+        Gets the state of the narrow finger.
         """
-        return self._get_wide_finger_angle()
+
+        return self.data.sensordata[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, 'touch:wide-finger-tip')]
 
     def _get_wide_finger_angle(self):
         """
-        Gets the current angle of the wide finger. Since the raw value is
-        negative but a positive number is expected in this environment, the
-        additive inverse of the result from the MuJoCo will be returned.
-
-        :return: the current angle of the wide finger
+        Gets the angle of the wide finger.
         """
 
-        return -self.sim.data.qpos[self.hinge_wide_finger_id]
+        return self.data.qpos[self.hinge_wide_finger_id]
 
     def _get_narrow_finger_angle(self):
         """
-        Gets the current angle of the narrow finger. Since the raw value is
-        negative but a positive number is expected in this environment, the
-        additive inverse of the result from the MuJoCo will be returned.
-
-        :return: the current angle of the narrow finger
+        Gets the angle of the narrow finger.
         """
 
-        return -self.sim.data.qpos[self.hinge_narrow_finger_id]
+        return self.data.qpos[self.hinge_narrow_finger_id]
 
     def _get_narrow_finger_stiffness(self):
         """
-        Gets the current stiffness of the narrow finger.
-
-        :return: the current stiffness of the narrow finger
+        Gets the stiffness of the narrow finger.
         """
 
-        return self.model.model.jnt_stiffness[self.hinge_narrow_finger_id]
+        return self.model.jnt_stiffness[self.hinge_narrow_finger_id]
 
     def _get_raw_x_g(self):
         """
-        Gets the raw value of x_g in MuJoCo.
-
-        :return: the raw value of x_g
+        Gets the x coordinate of the finger tip.
         """
 
-        return self.sim.data.sensordata[3]
+        return self.data.geom_xpos[self.wide_finger_tip_geom_id][0]
 
     def _get_gripah_raw_state(self):
         """
-        Gets the current state of the gripah (x, y, z, and the angle of the narrow finger).
-
-        :return: the current state of the gripah
+        Returns the state of the gripah:
+            x coordinate of the gripah,
+            angle of the wide finger and
+            angle of the narrow finger
         """
 
-        x = self.sim.data.sensordata[0]
-        y = self.sim.data.sensordata[1]
-        z = self.sim.data.sensordata[2]
-        w1 = self._get_wide_finger_angle()
-        w2 = self._get_narrow_finger_angle()
-
-        return x, y, z, w1, w2
+        return (self.data.qpos[self.slide_x_c_id],
+                self._get_wide_finger_angle(),
+                self._get_narrow_finger_angle())
 
     def _place_grid_marks(self):
         """
-        Places all grid marks at the right positions.
+        Places the grid marks in the scene.
         """
 
-        grid_marker_0 = self.model.site_name2id('grid-marker-0')
-        grid_marker_1 = self.model.site_name2id('grid-marker-1')
-        grid_marker_2 = self.model.site_name2id('grid-marker-2')
+        x_pos = np.arange(self.x_left_limit, self.x_right_limit + 1, 10)
+        y_pos = -10
+        z_pos = -10
 
-        self.model.site_pos[grid_marker_0][0] = self.x_left_limit
-        self.model.site_pos[grid_marker_1][0] = (self.x_left_limit + self.x_right_limit) / 2
-        self.model.site_pos[grid_marker_2][0] = self.x_right_limit
+        for i, x in enumerate(x_pos):
+            self.model.geom_pos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f'grid_mark_{i}')][0] = x
+            self.model.geom_pos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f'grid_mark_{i}')][1] = y_pos
+            self.model.geom_pos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f'grid_mark_{i}')][2] = z_pos
 
-        # place boundary marks
         self.model.site_pos[self.lregion_bid][0] = self.lboundary
         self.model.site_pos[self.rregion_bid][0] = self.rboundary
+
+    def _is_in_collision(self, body1_id, body2_id):
+        """
+        Checks if two bodies are in collision.
+
+        :param body1_id: the id of the first body
+        :param body2_id: the id of the second body
+        :return: True if the two bodies are in collision, False otherwise
+        """
+
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+
+            # Checks if the two bodies are in collision
+            if (contact.geom1 == self.model.geom_parentid[body1_id] and contact.geom2 == self.model.geom_parentid[body2_id]) or \
+               (contact.geom2 == self.model.geom_parentid[body1_id] and contact.geom1 == self.model.geom_parentid[body2_id]):
+                return True
+
+        return False

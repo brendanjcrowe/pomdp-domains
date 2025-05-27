@@ -6,15 +6,11 @@ import gin
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
-from gymnasium.utils import seeding
 
 # In gymnasium, rendering is moved from classic_control to a separate module
-try:
-    # Try the new location first
-    from gymnasium.envs.classic_control import rendering as visualize
-except ImportError:
-    # Fall back to new location in recent gymnasium versions
-    from gymnasium.rendering import rendering as visualize
+# For Gymnasium 0.28.1, this should be the correct path if classic_control extras are installed.
+from gymnasium.envs.classic_control import rendering as visualize
+from gymnasium.utils import seeding
 
 
 @gin.configurable
