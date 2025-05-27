@@ -8,7 +8,7 @@ setup(
         'numpy',
         'gymnasium',
         'matplotlib',
-        'mujoco_py',
+        'mujoco',
         'gin-config',
     ],
 )
