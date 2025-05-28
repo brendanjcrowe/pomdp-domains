@@ -89,7 +89,10 @@ class AntEnv(gym.Env):
         return np.concatenate((self.data.qpos, self.data.qvel, heaven_direction))
 
     # Reset simulation to state within initial state specified by user
-    def reset(self):
+    def reset(self, seed=None, options=None):
+
+        if seed is not None:
+            self.seed(seed)
 
         # Reset controls
         self.data.ctrl[:] = 0

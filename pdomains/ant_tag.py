@@ -81,8 +81,10 @@ class AntTagEnv(gym.Env):
         else:
             return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(2)))
 
-    # Reset simulation to state within initial state specified by user
-    def reset(self):
+    def reset(self, seed=None, options=None):
+
+        if seed is not None:
+            self.seed(seed)
 
         # Reset controls
         self.data.ctrl[:] = 0
