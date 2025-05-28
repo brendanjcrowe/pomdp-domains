@@ -5,6 +5,7 @@ import gymnasium as gym
 import mujoco
 import mujoco.viewer
 import numpy as np
+import numpy.typing as npt
 from gymnasium import spaces
 from gymnasium.utils import seeding
 
@@ -215,7 +216,7 @@ class BoxEnv(gym.Env):
     def _get_obs(self):
         
         return np.array((self.x_g / self.x_right_limit, 
-                self.theta))
+                self.theta), dtype=np.float32)
 
     def render(self, mode='human'):
         if self.rendering:
@@ -378,3 +379,11 @@ class BoxEnv(gym.Env):
                 return True
 
         return False
+    
+    def get_box_1_pos(self) -> npt.NDArray[np.float32]:
+        """Returns the current 2d pose of the box 1"""
+        return self.model.body_pos[self.small_box_bid].copy()
+
+    def get_box_2_pos(self) -> npt.NDArray[np.float32]:
+        """Returns the current 2d pose of the box 2"""
+        return self.model.body_pos[self.small_box_2_bid].copy()

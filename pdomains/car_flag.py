@@ -130,7 +130,7 @@ class CarEnv(gym.Env):
         terminated = done
         truncated = False
 
-        return self.state, env_reward, terminated, truncated, {}
+        return self.state.astype(np.float32), env_reward, terminated, truncated, {}
 
     def render(self, mode='human'):
         self._setup_view()

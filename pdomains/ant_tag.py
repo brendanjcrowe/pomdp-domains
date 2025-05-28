@@ -6,6 +6,7 @@ import gymnasium as gym
 import mujoco
 import mujoco.viewer
 import numpy as np
+import numpy.typing as npt
 from gymnasium import spaces
 from gymnasium.utils import seeding
 
@@ -77,9 +78,9 @@ class AntTagEnv(gym.Env):
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, target_pos_visible):
         if target_pos_visible:
-            return np.concatenate((self.data.qpos, self.data.qvel, self.data.mocap_pos[0][:2]))
+            return np.concatenate((self.data.qpos, self.data.qvel, self.data.mocap_pos[0][:2]), dtype=np.float32)
         else:
-            return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(2)))
+            return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(2)), dtype=np.float32)
 
     def reset(self, seed=None, options=None):
 
@@ -203,3 +204,7 @@ class AntTagEnv(gym.Env):
     def seed(self, seed=None):
         self.np_random, seed_ = seeding.np_random(seed)
         return [seed_]
+
+    def get_target_pos(self) -> npt.NDArray[np.float32]:
+        """Returns the current 2d pose of the target"""
+        return self.data.mocap_pos[0][:2].copy()

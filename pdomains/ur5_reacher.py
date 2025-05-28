@@ -178,7 +178,7 @@ class UR5Env(gym.Env):
 
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, target_pos, current_wrist_pos):
-        return np.concatenate((self.data.qpos, self.data.qvel, current_wrist_pos, target_pos))
+        return np.concatenate((self.data.qpos, self.data.qvel, current_wrist_pos, target_pos), dtype=np.float32)
 
     # Reset simulation to state within initial state specified by user
     def reset(self, seed=None, options=None):

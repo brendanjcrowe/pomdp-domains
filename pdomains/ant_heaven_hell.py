@@ -6,6 +6,7 @@ import gymnasium as gym
 import mujoco
 import mujoco.viewer
 import numpy as np
+import numpy.typing as npt
 from gymnasium import spaces
 from gymnasium.utils import seeding
 
@@ -82,11 +83,11 @@ class AntEnv(gym.Env):
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, reveal_heaven_direction, at_reset=False):
         if at_reset:
-            return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(1)))
+            return np.concatenate((self.data.qpos, self.data.qvel, np.zeros(1)), dtype=np.float32)
 
         heaven_direction = self.heaven_direction * np.ones(1) if reveal_heaven_direction else np.zeros(1)
 
-        return np.concatenate((self.data.qpos, self.data.qvel, heaven_direction))
+        return np.concatenate((self.data.qpos, self.data.qvel, heaven_direction), dtype=np.float32)
 
     # Reset simulation to state within initial state specified by user
     def reset(self, seed=None, options=None):
@@ -192,3 +193,11 @@ class AntEnv(gym.Env):
     def seed(self, seed=None):
         self.np_random, seed_ = seeding.np_random(seed)
         return [seed_]
+
+    def get_heaven_pos(self) -> npt.NDArray[np.float32]:
+        """Returns the current 2d pose of the heaven"""
+        return self.heaven_pos.copy()
+
+    def get_hell_pos(self) -> npt.NDArray[np.float32]:
+        """Returns the current 2d pose of the hell"""
+        return self.hell_pos.copy()
