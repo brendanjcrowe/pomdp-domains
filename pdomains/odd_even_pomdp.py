@@ -1,10 +1,11 @@
 """
 Odd-Even POMDP Implementation
 
-This implements a variant of the classic Odd-Even POMDP where:
+This implements a variant where:
 - Numbers range from 1 to n (hyperparameter)
-- True state is either "odd" or "even" (fixed throughout episode)
-- Observations are drawn from Gaussian distributions but constrained to odd/even integers
+- Hidden parameter: either "odd" or "even" (fixed throughout episode)
+- True distribution: Gaussian distribution constrained to odd/even numbers only
+- Prediction task: predict the mode (peak) of the distribution
 - Mean and standard deviation are hyperparameters with defaults
 """
 
@@ -21,18 +22,22 @@ class OddEvenPOMDPConfig:
     mean: Optional[float] = None  # Mean of Gaussian (random if None)
     std_dev: float = 2.0  # Standard deviation of Gaussian
     seed: Optional[int] = None  # Random seed for reproducibility
+    belief_resolution: int = 100  # Number of discrete belief points for mode estimation
 
 
 class OddEvenPOMDP:
     """
-    Odd-Even POMDP where observations are drawn from Gaussian distributions
-    constrained to odd/even integers in the range [1, n].
+    Mode Prediction POMDP where:
+    - Hidden parameter is either "odd" or "even"
+    - Observations are drawn from Gaussian distributions constrained to odd/even integers
+    - Agent must predict the mode of the distribution
     """
     
     def __init__(self, config: OddEvenPOMDPConfig):
         self.config = config
         self.n = config.n
         self.std_dev = config.std_dev
+        self.belief_resolution = config.belief_resolution
         
         # Initialize random number generator
         self.rng = np.random.RandomState(config.seed)
@@ -43,123 +48,136 @@ class OddEvenPOMDP:
         else:
             self.mean = config.mean
             
-        # True state (fixed throughout episode)
-        self.true_state = self.rng.choice(['odd', 'even'])
+        # Hidden parameter (fixed throughout episode)
+        self.hidden_param = self.rng.choice(['odd', 'even'])
         
         # Generate valid odd and even numbers in range [1, n]
         self.odd_numbers = np.array([i for i in range(1, self.n + 1) if i % 2 == 1])
         self.even_numbers = np.array([i for i in range(1, self.n + 1) if i % 2 == 0])
         
+        # Create discrete belief space for mode estimation
+        self.belief_points = np.linspace(1, self.n, self.belief_resolution)
+        
+        # Initialize uniform belief over possible modes
+        self.belief = np.ones(self.belief_resolution) / self.belief_resolution
+        
         # Pre-compute probabilities for efficiency
         self._compute_probabilities()
         
     def _compute_probabilities(self):
-        """Pre-compute observation probabilities for odd and even states"""
-        # Compute Gaussian probabilities for odd numbers
-        odd_probs = np.exp(-0.5 * ((self.odd_numbers - self.mean) / self.std_dev) ** 2)
-        odd_probs = odd_probs / np.sum(odd_probs)  # Normalize
-        
-        # Compute Gaussian probabilities for even numbers  
-        even_probs = np.exp(-0.5 * ((self.even_numbers - self.mean) / self.std_dev) ** 2)
-        even_probs = even_probs / np.sum(even_probs)  # Normalize
-        
-        self.odd_probs = odd_probs
-        self.even_probs = even_probs
+        """Pre-compute observation probabilities for the hidden parameter"""
+        if self.hidden_param == 'odd':
+            # Compute Gaussian probabilities for odd numbers
+            self.observation_probs = np.exp(-0.5 * ((self.odd_numbers - self.mean) / self.std_dev) ** 2)
+            self.observation_probs = self.observation_probs / np.sum(self.observation_probs)  # Normalize
+            self.valid_numbers = self.odd_numbers
+        else:  # even
+            # Compute Gaussian probabilities for even numbers
+            self.observation_probs = np.exp(-0.5 * ((self.even_numbers - self.mean) / self.std_dev) ** 2)
+            self.observation_probs = self.observation_probs / np.sum(self.observation_probs)  # Normalize
+            self.valid_numbers = self.even_numbers
         
     def get_observation(self) -> int:
         """
-        Generate an observation based on the true state.
+        Generate an observation based on the hidden parameter.
         
         Returns:
             int: An observation (odd or even integer in range [1, n])
         """
-        if self.true_state == 'odd':
-            return self.rng.choice(self.odd_numbers, p=self.odd_probs)
-        else:  # even
-            return self.rng.choice(self.even_numbers, p=self.even_probs)
+        return self.rng.choice(self.valid_numbers, p=self.observation_probs)
     
-    def get_reward(self, action: str) -> float:
+    def get_reward(self, predicted_mode: float) -> float:
         """
-        Get reward for taking an action.
+        Get reward for predicting a mode.
         
         Args:
-            action: Either 'odd' or 'even'
+            predicted_mode: The predicted mode value
             
         Returns:
-            float: +1 if action matches true state, -1 otherwise
+            float: Negative squared error as reward
         """
-        return 1.0 if action == self.true_state else -1.0
+        error = predicted_mode - self.mean
+        return -error ** 2  # Negative squared error (higher reward for better predictions)
     
-    def get_observation_probability(self, observation: int, state: str) -> float:
+    def _compute_observation_probability(self, observation: int, mode: float) -> float:
         """
-        Get the probability of observing 'observation' given state 'state'.
+        Compute probability of observation given a specific mode.
         
         Args:
             observation: The observed integer
-            state: Either 'odd' or 'even'
+            mode: The mode of the Gaussian distribution
             
         Returns:
-            float: Probability of observation given state
+            float: Probability of observation given mode
         """
-        if state == 'odd':
-            if observation in self.odd_numbers:
-                idx = np.where(self.odd_numbers == observation)[0][0]
-                return self.odd_probs[idx]
-            else:
-                return 0.0
-        else:  # even
-            if observation in self.even_numbers:
-                idx = np.where(self.even_numbers == observation)[0][0]
-                return self.even_probs[idx]
-            else:
-                return 0.0
+        # Check if observation is consistent with hidden parameter
+        if self.hidden_param == 'odd' and observation % 2 == 0:
+            return 0.0
+        if self.hidden_param == 'even' and observation % 2 == 1:
+            return 0.0
+            
+        # Compute Gaussian probability
+        prob = np.exp(-0.5 * ((observation - mode) / self.std_dev) ** 2)
+        
+        # Normalize over valid numbers for this hidden parameter
+        if self.hidden_param == 'odd':
+            valid_nums = self.odd_numbers
+        else:
+            valid_nums = self.even_numbers
+            
+        normalization = np.sum(np.exp(-0.5 * ((valid_nums - mode) / self.std_dev) ** 2))
+        
+        return prob / normalization if normalization > 0 else 0.0
     
-    def update_belief(self, belief: np.ndarray, observation: int) -> np.ndarray:
+    def update_belief(self, observation: int) -> np.ndarray:
         """
         Update belief state using Bayes' rule.
         
         Args:
-            belief: Current belief state [P(odd), P(even)]
             observation: New observation
             
         Returns:
-            np.ndarray: Updated belief state
+            np.ndarray: Updated belief state over possible modes
         """
-        # Get observation probabilities
-        p_obs_given_odd = self.get_observation_probability(observation, 'odd')
-        p_obs_given_even = self.get_observation_probability(observation, 'even')
+        # Compute likelihood for each possible mode
+        likelihoods = np.array([self._compute_observation_probability(observation, mode) 
+                               for mode in self.belief_points])
         
-        # Bayes' rule: P(state|obs) = P(obs|state) * P(state) / P(obs)
-        # P(obs) = P(obs|odd) * P(odd) + P(obs|even) * P(even)
-        p_obs = p_obs_given_odd * belief[0] + p_obs_given_even * belief[1]
+        # Bayes' rule: P(mode|obs) = P(obs|mode) * P(mode) / P(obs)
+        # P(obs) = sum over all modes of P(obs|mode) * P(mode)
+        p_obs = np.sum(likelihoods * self.belief)
         
         if p_obs == 0:
             # If observation is impossible, return uniform belief
-            return np.array([0.5, 0.5])
+            self.belief = np.ones(self.belief_resolution) / self.belief_resolution
+        else:
+            # Updated belief
+            self.belief = likelihoods * self.belief / p_obs
         
-        # Updated belief
-        new_belief = np.array([
-            p_obs_given_odd * belief[0] / p_obs,
-            p_obs_given_even * belief[1] / p_obs
-        ])
-        
-        return new_belief
+        return self.belief
     
-    def get_optimal_action(self, belief: np.ndarray) -> str:
+    def get_optimal_prediction(self) -> float:
         """
-        Get the optimal action given current belief state.
+        Get the optimal mode prediction given current belief state.
         
-        Args:
-            belief: Current belief state [P(odd), P(even)]
-            
         Returns:
-            str: Optimal action ('odd' or 'even')
+            float: Optimal mode prediction (expected value of belief)
         """
-        return 'odd' if belief[0] > belief[1] else 'even'
+        return np.sum(self.belief_points * self.belief)
+    
+    def get_max_likelihood_prediction(self) -> float:
+        """
+        Get the maximum likelihood mode prediction.
+        
+        Returns:
+            float: Mode with highest belief probability
+        """
+        max_idx = np.argmax(self.belief)
+        return self.belief_points[max_idx]
     
     def reset(self, new_seed: Optional[int] = None):
         """
-        Reset the POMDP with a new true state.
+        Reset the POMDP with a new hidden parameter.
         
         Args:
             new_seed: Optional new random seed
@@ -167,8 +185,14 @@ class OddEvenPOMDP:
         if new_seed is not None:
             self.rng = np.random.RandomState(new_seed)
         
-        # Choose new true state
-        self.true_state = self.rng.choice(['odd', 'even'])
+        # Choose new hidden parameter
+        self.hidden_param = self.rng.choice(['odd', 'even'])
+        
+        # Reset belief to uniform
+        self.belief = np.ones(self.belief_resolution) / self.belief_resolution
+        
+        # Recompute probabilities
+        self._compute_probabilities()
         
     def get_info(self) -> dict:
         """
@@ -181,48 +205,48 @@ class OddEvenPOMDP:
             'n': self.n,
             'mean': self.mean,
             'std_dev': self.std_dev,
-            'true_state': self.true_state,
+            'hidden_param': self.hidden_param,
             'odd_numbers': self.odd_numbers.tolist(),
             'even_numbers': self.even_numbers.tolist(),
-            'odd_probs': self.odd_probs.tolist(),
-            'even_probs': self.even_probs.tolist()
+            'valid_numbers': self.valid_numbers.tolist(),
+            'observation_probs': self.observation_probs.tolist(),
+            'belief_points': self.belief_points.tolist(),
+            'current_belief': self.belief.tolist()
         }
 
 
 def run_example():
-    """Example usage of the OddEvenPOMDP"""
-    print("Odd-Even POMDP Example")
+    """Example usage of the ModePredictionPOMDP"""
+    print("Mode Prediction POMDP Example")
     print("=" * 50)
     
     # Create POMDP with default configuration
-    config = OddEvenPOMDPConfig(n=10, std_dev=1.5, seed=42)
-    pomdp = OddEvenPOMDP(config)
+    config = ModePredictionPOMDPConfig(n=10, std_dev=1.5, seed=42)
+    pomdp = ModePredictionPOMDP(config)
     
     print(f"Configuration: n={config.n}, mean={pomdp.mean:.2f}, std_dev={config.std_dev}")
-    print(f"True state: {pomdp.true_state}")
-    print(f"Odd numbers: {pomdp.odd_numbers}")
-    print(f"Even numbers: {pomdp.even_numbers}")
+    print(f"Hidden parameter: {pomdp.hidden_param}")
+    print(f"Valid numbers: {pomdp.valid_numbers}")
     print()
     
-    # Start with uniform belief
-    belief = np.array([0.5, 0.5])
-    print(f"Initial belief: P(odd)={belief[0]:.3f}, P(even)={belief[1]:.3f}")
-    
-    # Generate some observations and update belief
-    print("\nGenerating observations and updating belief:")
+    print("Generating observations and updating belief:")
     print("-" * 40)
     
-    for step in range(5):
+    # Generate some observations and update belief
+    for step in range(8):
         obs = pomdp.get_observation()
-        belief = pomdp.update_belief(belief, obs)
-        action = pomdp.get_optimal_action(belief)
-        reward = pomdp.get_reward(action)
+        pomdp.update_belief(obs)
+        optimal_pred = pomdp.get_optimal_prediction()
+        ml_pred = pomdp.get_max_likelihood_prediction()
+        reward = pomdp.get_reward(optimal_pred)
         
-        print(f"Step {step + 1}: obs={obs}, belief=[{belief[0]:.3f}, {belief[1]:.3f}], "
-              f"action={action}, reward={reward}")
+        print(f"Step {step + 1}: obs={obs}, optimal_pred={optimal_pred:.2f}, "
+              f"ml_pred={ml_pred:.2f}, reward={reward:.3f}")
     
-    print(f"\nTrue state was: {pomdp.true_state}")
-    print(f"Final belief: P(odd)={belief[0]:.3f}, P(even)={belief[1]:.3f}")
+    print(f"\nTrue mean: {pomdp.mean:.2f}")
+    print(f"Hidden parameter: {pomdp.hidden_param}")
+    print(f"Final optimal prediction: {pomdp.get_optimal_prediction():.2f}")
+    print(f"Final ML prediction: {pomdp.get_max_likelihood_prediction():.2f}")
 
 
 if __name__ == "__main__":
