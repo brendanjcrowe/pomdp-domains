@@ -13,8 +13,10 @@ This implements a variant where:
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
+from gymnasium import spaces
 from scipy.stats import norm
 
 
@@ -31,7 +33,7 @@ class OddEvenPOMDPConfig:
     
 
 
-class OddEvenPOMDP:
+class OddEvenPOMDP(gym.Env):
     """
     Mean Prediction POMDP where:
     - Hidden parameter is either "odd" or "even"
@@ -41,13 +43,14 @@ class OddEvenPOMDP:
     """
     
     def __init__(self, config: OddEvenPOMDPConfig):
+        super().__init__()
         print("Initializing OddEvenPOMDP")
         self.config = config
         self.n_dist_size = config.n_dist_size
         self.std_dev = config.std_dev
         self.n_particles = config.n_particles
         self.true_particles = config.true_particles
-        self.resmaple_proportion = config.resample_proportion
+        self.resample_proportion = config.resample_proportion
         
         # Initialize random number generator
         self.rng = np.random.RandomState(config.seed)
@@ -86,32 +89,79 @@ class OddEvenPOMDP:
         # Pre-compute probabilities for efficiency
         self._compute_probabilities()
         
+        # Initialize particles
+        particles = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
+        self.particles = particles
+        
+        # Define action and observation spaces for gymnasium
+        # Action space: discrete actions from 0 to n_dist_size-1 (predicting the mean, 0-indexed)
+        self.action_space = spaces.Discrete(config.n_dist_size)
+        
+        # Observation space: particles from the POMDP
+        self.observation_space = spaces.Box(
+            low=1.0,
+            high=float(config.n_dist_size),
+            shape=(config.n_particles,),
+            dtype=np.float32
+        )
+        
     def step(self, action: int):
         """
         Take a step in the POMDP.
         
         Args:
-            action: The action to take (integer)
+            action: The action to take (integer, 0-indexed, will be converted to 1-indexed for prediction)
         
         Returns:
-            Tuple[np.ndarray, float, bool, dict]: Observation, reward, done, info
+            Tuple[np.ndarray, float, bool, bool, dict]: Observation, reward, terminated, truncated, info
         """
-        samples = np.random.choice(self.n_dist_size, p=self.observation_probs, size=self.n_particles)
+        # Convert action from 0-indexed to 1-indexed (action is prediction of mean)
+        predicted_mean = int(action) + 1
+        
+        # Generate new observation samples
+        samples = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
+        
         if self.true_particles:
-           self.particles = samples
+            self.particles = samples
         else:
-            gaussians = norm(loc=samples.mean(), scale=samples.std())
-            weights = gaussians.pdf(self.particles)
-            weights /= weights.sum()
-            indices = np.random.choice(self.n_particles, size=int(self.n_particles * self.resample_proportion), replace=False, p=1-weights)
-            self.particles[indices] = np.random.uniform(1, self.n_dist_size, size=len(indices))
-        reward = self.get_reward(action)
-        done = self.step >= self.max_steps
-        self.step += 1
-        return self.particles, reward, done, {}
+            # Resample particles based on observation
+            if hasattr(self, 'particles') and len(self.particles) > 0:
+                gaussians = norm(loc=samples.mean(), scale=samples.std())
+                weights = gaussians.pdf(self.particles)
+                if weights.sum() > 0:
+                    weights /= weights.sum()
+                    indices = self.rng.choice(self.n_particles, size=int(self.n_particles * self.resample_proportion), replace=False, p=1-weights)
+                    self.particles[indices] = self.rng.uniform(1, self.n_dist_size, size=len(indices))
+            else:
+                self.particles = samples
+        
+        # Get reward for the predicted mean
+        reward = self.get_reward(predicted_mean)
+        
+        # Update observation history for rendering
+        if len(samples) > 0:
+            self.observation_history.append(samples[0])  # Store first sample as observation
+        
+        # Note: max_steps check removed as it's handled by the gym adapter
+        terminated = False
+        truncated = False
+        
+        if not hasattr(self, 'step_count'):
+            self.step_count = 0
+        self.step_count += 1
+        
+        # Convert particles to float32 for observation space
+        obs = self.particles.astype(np.float32)
+        info = {
+            'true_mean': self.mean,
+            'predicted_mean': predicted_mean,
+            'hidden_param': self.hidden_param
+        }
+        
+        return obs, reward, terminated, truncated, info
     def _init_particle_set(self):
         """Initialize particle set for mode estimation"""
-        return np.random.rand(self.n_particles) * self.n
+        return self.rng.rand(self.n_particles) * self.n_dist_size
         
     def _compute_probabilities(self):
         """Pre-compute observation probabilities for the hidden parameter"""
@@ -239,13 +289,19 @@ class OddEvenPOMDP:
         max_idx = np.argmax(self.belief)
         return int(self.belief_points[max_idx])
     
-    def reset(self, seed: Optional[int] = None):
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         """
         Reset the POMDP with a new hidden parameter.
         
         Args:
-            new_seed: Optional new random seed
+            seed: Optional new random seed
+            options: Optional dict with reset options
+        
+        Returns:
+            Tuple[np.ndarray, dict]: Observation (particles) and info dict
         """
+        super().reset(seed=seed)
+        
         if seed is not None:
             self.rng = np.random.RandomState(seed)
         
@@ -266,8 +322,20 @@ class OddEvenPOMDP:
         
         # Recompute probabilities (this will also update belief_points and reset belief)
         self._compute_probabilities()
-        self.step = 0
-        return np.random.choice(self.n_dist_size, p=self.observation_probs, size=self.n_particles), 
+        self.step_count = 0
+        
+        # Initialize particles
+        particles = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
+        self.particles = particles
+        
+        # Convert to float32 for observation space
+        obs = particles.astype(np.float32)
+        info = {
+            'true_mean': self.mean,
+            'hidden_param': self.hidden_param
+        }
+        
+        return obs, info 
         
     def get_info(self) -> dict:
         """
@@ -277,7 +345,7 @@ class OddEvenPOMDP:
             dict: Information about the POMDP configuration and state
         """
         return {
-            'n': self.n,
+            'n_dist_size': self.n_dist_size,
             'raw_mean': self.raw_mean,
             'mean': self.mean,
             'std_dev': self.std_dev,
@@ -342,7 +410,7 @@ class OddEvenPOMDP:
             ax3.set_ylabel('Observation Value')
             ax3.set_title(f'Recent Observations (last {len(recent_obs)})')
             ax3.grid(True, alpha=0.3)
-            ax3.set_ylim([0.5, self.n_dist_size+ 0.5])
+            ax3.set_ylim([0.5, self.n_dist_size + 0.5])
         else:
             ax3.text(0.5, 0.5, 'No observations yet', 
                     ha='center', va='center', transform=ax3.transAxes, fontsize=12)
@@ -354,7 +422,7 @@ class OddEvenPOMDP:
         
         info_text = f"""
 Configuration:
-  • Range: [1, {self.n}]
+  • Range: [1, {self.n_dist_size}]
   • Std Dev: {self.std_dev:.2f}
   • Valid Means: {len(self.belief_points)}
 
@@ -465,10 +533,10 @@ def run_example():
     print("=" * 60)
     
     # Create POMDP with default configuration
-    config = OddEvenPOMDPConfig(n=10, std_dev=1.5, seed=42)
+    config = OddEvenPOMDPConfig(n_dist_size=10, std_dev=1.5, seed=42)
     pomdp = OddEvenPOMDP(config)
     
-    print(f"Configuration: n={config.n}, raw_mean={pomdp.raw_mean:.2f}, true_mean={pomdp.mean}, std_dev={config.std_dev}")
+    print(f"Configuration: n_dist_size={config.n_dist_size}, raw_mean={pomdp.raw_mean:.2f}, true_mean={pomdp.mean}, std_dev={config.std_dev}")
     print(f"Hidden parameter: {pomdp.hidden_param}")
     print(f"Valid numbers: {pomdp.valid_numbers}")
     print()
