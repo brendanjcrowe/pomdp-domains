@@ -152,10 +152,22 @@ class OddEvenPOMDP(gym.Env):
         
         # Convert particles to float32 for observation space
         obs = self.particles.astype(np.float32)
+        
+        # Compute normalized reward between theoretical min and max
+        min_reward, max_reward = self.get_reward_bounds()
+        # Avoid division by zero if bounds collapse (should not happen here)
+        if max_reward == min_reward:
+            normalized_reward = 0.0
+        else:
+            normalized_reward = (reward - min_reward) / (max_reward - min_reward)
+        
         info = {
             'true_mean': self.mean,
             'predicted_mean': predicted_mean,
-            'hidden_param': self.hidden_param
+            'hidden_param': self.hidden_param,
+            'reward_min': min_reward,
+            'reward_max': max_reward,
+            'reward_normalized': float(normalized_reward),
         }
         
         return obs, reward, terminated, truncated, info
@@ -214,6 +226,22 @@ class OddEvenPOMDP(gym.Env):
         """
         error = predicted_mean - self.mean
         return -error ** 2  # Negative squared error (higher reward for better predictions)
+    
+    def get_reward_bounds(self) -> Tuple[float, float]:
+        """
+        Get theoretical minimum and maximum possible reward.
+        
+        Reward is defined as - (predicted_mean - true_mean)^2 with true_mean in [1, n_dist_size]
+        and predictions also in [1, n_dist_size]. The best possible reward is 0 (perfect prediction),
+        and the worst is when prediction and true mean are at opposite ends of the range.
+        
+        Returns:
+            Tuple[float, float]: (min_reward, max_reward)
+        """
+        max_reward = 0.0
+        # Maximum squared error occurs between 1 and n_dist_size: (n_dist_size - 1)^2
+        min_reward = -float((self.n_dist_size - 1) ** 2)
+        return min_reward, max_reward
     
     def _compute_observation_probability(self, observation: int, mean: int) -> float:
         """
