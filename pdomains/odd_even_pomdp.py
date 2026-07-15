@@ -329,10 +329,14 @@ class OddEvenPOMDP(gym.Env):
             Tuple[np.ndarray, dict]: Observation (particles) and info dict
         """
         super().reset(seed=seed)
-        
+
         if seed is not None:
             self.rng = np.random.RandomState(seed)
-        
+
+        # Resample raw_mean each episode unless a fixed mean was configured.
+        if self.config.mean is None:
+            self.raw_mean = self.rng.uniform(1, self.n_dist_size)
+
         # Choose new hidden parameter
         self.hidden_param = self.rng.choice(['odd', 'even'])
         
