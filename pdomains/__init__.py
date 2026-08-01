@@ -23,3 +23,9 @@ register(
     entry_point='pdomains.ant_tag:AntTagEnv',
     max_episode_steps=400,
 )
+
+register(
+    id='pdomains-ant-tag-smart-v0',
+    entry_point='pdomains.ant_tag:SmartAntTagEnv',
+    max_episode_steps=400,
+)

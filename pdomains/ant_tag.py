@@ -208,3 +208,77 @@ class AntTagEnv(gym.Env):
     def get_target_pos(self) -> npt.NDArray[np.float32]:
         """Returns the current 2d pose of the target"""
         return self.data.mocap_pos[0][:2].copy()
+
+
+class SmartAntTagEnv(AntTagEnv):
+    """AntTag variant with a distance-aware target: flees more often as the ant
+    closes in, and slides along the cage wall instead of freezing against it.
+
+    `evasion_scale` (default 1.0) dials how much of that "smartness" is
+    active: 0.0 reduces the flee/stay behavior to the base AntTagEnv's
+    flat 25/25/25/25 target, 1.0 is full smart behavior. Wall
+    sliding is unaffected by evasion_scale since it's a dynamics fix, not a
+    difficulty knob. A curriculum (see 4_train_rl_frozen.py's
+    CurriculumVisibilityWrapper.set_evasion_scale) can anneal this over
+    training instead of exposing the smart target at full strength from
+    the start.
+
+    `target_speed_scale` (default 0.0 = OFF) additionally lets the target
+    move FASTER as it gets cornered: step size becomes
+    target_step * (1 + urgency * target_speed_scale), so 1.0 reproduces the
+    old hardcoded "up to 2x speed when cornered" behavior.
+
+    It defaults to OFF because urgency is keyed to visible_radius -- it is
+    nonzero only when dist < visible_radius, i.e. exactly when the target is
+    VISIBLE. So a speed boost adds no belief-tracking difficulty whatsoever
+    (while the ant is blind, urgency is 0 and this env is identical to
+    AntTagEnv apart from wall sliding); it only makes the terminal,
+    fully-observed chase harder. That is pure control difficulty, and control
+    is already the binding constraint: the trained locomotion policy's
+    measured per-step displacement is ~0.17 mean / 0.42 max, which is below
+    the target's *baseline* 0.5 step, and far below the 1.0 it would reach at
+    urgency=1 with scale 1.0. Prefer shrinking visible_radius to make the
+    task harder in a way that actually stresses the belief representation.
+    """
+
+    def __init__(self, *args, target_speed_scale: float = 0.0, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.evasion_scale = 1.0
+        self.target_speed_scale = target_speed_scale
+
+    def _move_target(self, ant_pos, current_target_pos):
+        target2ant_vec = ant_pos - current_target_pos
+        dist = np.linalg.norm(target2ant_vec)
+        target2ant_vec = target2ant_vec / dist
+
+        per_vec_1 = np.array([target2ant_vec[1], -target2ant_vec[0]])
+        per_vec_2 = np.array([-target2ant_vec[1], target2ant_vec[0]])
+        opposite_vec = -target2ant_vec
+        stay_vec = np.zeros(2)
+
+        vec_list = [per_vec_1, per_vec_2, opposite_vec, stay_vec]
+
+        # 0 when the ant is at/beyond visible_radius (flat/random, same as AntTagEnv),
+        # 1 when the ant is within tag_radius (flee hard and fast)
+        urgency = np.clip(
+            (self.visible_radius - dist) / (self.visible_radius - self.tag_radius), 0.0, 1.0
+        ) * self.evasion_scale
+
+        p_flee = 0.25 + urgency * 0.45   # 0.25 -> 0.70
+        p_stay = 0.25 - urgency * 0.20   # 0.25 -> 0.05
+        p_side = (1.0 - p_flee - p_stay) / 2.0
+        probs = [p_side, p_side, p_flee, p_stay]
+
+        chosen_vec_idx = self.np_random.choice(np.arange(4), p=probs)
+        # Constant speed by default (target_speed_scale=0.0): the target flees
+        # more OFTEN when cornered, but never faster. Set target_speed_scale=1.0
+        # for the old "up to 2x speed when cornered" behavior -- see class docstring.
+        step_size = self.target_step * (1.0 + urgency * self.target_speed_scale)
+
+        candidate_pos = np.array(vec_list[chosen_vec_idx]) * step_size + current_target_pos
+
+        # Slide along the wall instead of freezing when a move would exit the cage
+        candidate_pos[0] = np.clip(candidate_pos[0], -self.cage_max_x, self.cage_max_x)
+        candidate_pos[1] = np.clip(candidate_pos[1], -self.cage_max_y, self.cage_max_y)
+
+        self.data.mocap_pos[0][:2] = candidate_pos
