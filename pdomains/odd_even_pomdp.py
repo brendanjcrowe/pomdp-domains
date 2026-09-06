@@ -7,12 +7,23 @@ This implements a variant where:
 - Observations are drawn from a Gaussian centered at true_state, restricted
   to integers sharing true_state's own parity (odd/even) -- parity is just
   a property of true_state, not a separate hidden variable
-- Prediction task: predict true_state as an integer
+- Prediction task: predict true_state as an integer, scored 1.0 for an
+  exact hit and 0.0 otherwise. (This was -(pred - s*)^2 until
+  2026-09-03; under that rule the posterior mean was an exact
+  sufficient statistic for the optimal action, so no belief encoder
+  richer than mean+variance could be distinguished. See get_reward.)
 - Standard deviation defaults to a value computed from n_dist_size
   (sqrt(n_dist_size)/sigma_divisor + 1), or can be pinned to a fixed
   constant via an explicit std_dev override
+
+Each step emits `obs_per_step` observations (default 1) and folds every one
+of them into the env's own exact posterior, which travels in `info` -- never
+in the agent's observation. The registered ids are pdomains-odd-even-10-v0,
+pdomains-odd-even-50-v0 and pdomains-odd-even-50-long-v0; every episode cap
+lives on the registration.
 """
 
+import warnings
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -20,7 +31,7 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 import numpy as np
 from gymnasium import spaces
-from scipy.stats import norm
+from gymnasium.utils import seeding
 
 
 @dataclass
@@ -46,13 +57,65 @@ class OddEvenPOMDPConfig:
     # n_dist_size=10.
     sigma_divisor: float = float(np.sqrt(10))
     seed: Optional[int] = None  # Random seed for reproducibility
-    n_particles: int = 100  # Number of discrete belief points for mode estimation
-    true_particles: bool =  True
+    # How many independent observations step() emits per timestep.
+    #
+    # ONE is the only value that leaves a belief problem to solve. The
+    # observations are i.i.d. given true_state, so k of them shrink the
+    # standard error of the mean by sqrt(k): at n_dist_size=50 the old
+    # default of 100 gave a standard error of 0.28 against a state grid of
+    # spacing 1, so a memoryless policy pinned the state from a single step
+    # and no belief encoder could be told apart from any other.
+    #
+    # This is NOT the belief encoder's particle count. That count belongs to
+    # the particle filter, which lives on the wrapper, not on the env.
+    obs_per_step: Optional[int] = None      # resolved to 1 in __post_init__
+    # DEPRECATED alias for obs_per_step. The old name meant three different
+    # things at once -- observations per step, the observation-space shape,
+    # and a resampling size -- so it could not be read without ambiguity.
+    n_particles: Optional[int] = None
+    # Observation mode. True (the default) emits fresh draws from the true
+    # observation model: the honest POMDP observation. False emits a sample
+    # from the env's OWN exact posterior instead. That is a diagnostic
+    # oracle-belief mode which hands the agent the posterior, so it must
+    # never be used for an encoder comparison -- and never with an external
+    # particle filter, which would read those samples as fresh observations
+    # and count the same evidence twice.
+    true_particles: bool = True
+    # Unused. The resampling branch this configured never implemented a
+    # valid Bayes step; the field is kept so existing callers construct.
     resample_proportion: float = 0.5
 
     def __post_init__(self):
         if self.std_dev is None:
             self.std_dev = np.sqrt(self.n_dist_size) / self.sigma_divisor + 1
+
+        # Resolve the obs_per_step / n_particles alias. Disagreement raises:
+        # picking one of two contradicting values silently would change the
+        # difficulty of the entire task without saying so.
+        if (self.obs_per_step is not None and self.n_particles is not None
+                and int(self.obs_per_step) != int(self.n_particles)):
+            raise ValueError(
+                f"obs_per_step={self.obs_per_step} contradicts the "
+                f"deprecated alias n_particles={self.n_particles}. Pass "
+                "obs_per_step only."
+            )
+        if self.obs_per_step is None:
+            if self.n_particles is None:
+                self.obs_per_step = 1
+            else:
+                warnings.warn(
+                    "OddEvenPOMDPConfig.n_particles is deprecated; it names "
+                    "the emitted-observation count, so use obs_per_step.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                self.obs_per_step = int(self.n_particles)
+        self.obs_per_step = int(self.obs_per_step)
+        if self.obs_per_step < 1:
+            raise ValueError(
+                f"obs_per_step must be >= 1, got {self.obs_per_step}")
+        # Keep the alias readable and consistent for anything still on it.
+        self.n_particles = self.obs_per_step
 
 
 
@@ -65,19 +128,31 @@ class OddEvenPOMDP(gym.Env):
     - Agent must predict true_state as an integer
     """
 
+    # Declared so gym.make(..., render_mode=...) and the passive env checker
+    # can see what render() supports.
+    metadata = {"render_modes": ["human", "rgb_array"]}
+
     def __init__(self, config: OddEvenPOMDPConfig):
         super().__init__()
-        print("Initializing OddEvenPOMDP")
         self.config = config
         self.n_dist_size = config.n_dist_size
         self.std_dev = config.std_dev
         self.sigma_divisor = config.sigma_divisor
-        self.n_particles = config.n_particles
+        self.obs_per_step = config.obs_per_step
         self.true_particles = config.true_particles
-        self.resample_proportion = config.resample_proportion
 
-        # Initialize random number generator
-        self.rng = np.random.RandomState(config.seed)
+        # Seed gymnasium's own generator rather than keeping a private
+        # RandomState. `self.rng` is an alias for it (see the property
+        # below), so every draw in this env comes from the one stream that
+        # super().reset(seed=...) reseeds. Two consequences worth stating:
+        # env.np_random -- the attribute every standard tool reaches for --
+        # is now the env's real randomness, and reset(seed=k) reproduces
+        # episode k exactly, because on this env the hidden state is drawn at
+        # reset, so the seed IS the episode. An eval loop must therefore pass
+        # seed + episode_index, never a constant seed.
+        if config.seed is not None:
+            self._np_random, self._np_random_seed = seeding.np_random(
+                config.seed)
 
         # Generate valid odd and even numbers in range [1, n]
         self.odd_numbers = np.array([i for i in range(1, self.n_dist_size + 1) if i % 2 == 1])
@@ -115,25 +190,32 @@ class OddEvenPOMDP(gym.Env):
 
         # Track observation history for rendering
         self.observation_history = []
+        self.step_count = 0
 
         # Pre-compute the true observation-generating distribution for efficiency
         self._compute_probabilities()
-
-        # Initialize particles
-        particles = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
-        self.particles = particles
 
         # Define action and observation spaces for gymnasium
         # Action space: discrete actions from 0 to n_dist_size-1 (predicting true_state, 0-indexed)
         self.action_space = spaces.Discrete(config.n_dist_size)
 
-        # Observation space: particles from the POMDP
+        # Observation space: the observations this step emits. Its shape
+        # follows obs_per_step, which is the only quantity that decides it.
         self.observation_space = spaces.Box(
             low=1.0,
             high=float(config.n_dist_size),
-            shape=(config.n_particles,),
+            shape=(self.obs_per_step,),
             dtype=np.float32
         )
+
+    @property
+    def rng(self) -> np.random.Generator:
+        """Alias for gymnasium's seeded generator.
+
+        Kept as a name so callers that reach for `env.rng` keep working,
+        while there is only ONE stream to seed.
+        """
+        return self.np_random
 
     def step(self, action: int):
         """
@@ -148,40 +230,41 @@ class OddEvenPOMDP(gym.Env):
         # Convert action from 0-indexed to 1-indexed (action is a prediction of true_state)
         predicted_state = int(action) + 1
 
-        # Generate new observation samples
-        samples = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
-
-        if self.true_particles:
-            self.particles = samples
-        else:
-            # Resample particles based on observation
-            if hasattr(self, 'particles') and len(self.particles) > 0:
-                gaussians = norm(loc=samples.mean(), scale=samples.std())
-                weights = gaussians.pdf(self.particles)
-                if weights.sum() > 0:
-                    weights /= weights.sum()
-                    indices = self.rng.choice(self.n_particles, size=int(self.n_particles * self.resample_proportion), replace=False, p=1-weights)
-                    self.particles[indices] = self.rng.uniform(1, self.n_dist_size, size=len(indices))
-            else:
-                self.particles = samples
+        # Emit this step's observations and fold EVERY one of them into the
+        # env's own posterior. update_belief() was correct but unreachable
+        # from step(), so env.belief stayed exactly the uniform prior for a
+        # whole episode -- which silently turned get_optimal_prediction() and
+        # get_max_likelihood_prediction(), and so any oracle or probe label
+        # built on them, into a constant.
+        observations = self._draw_observations(self.obs_per_step)
+        for observation in observations:
+            self.update_belief(int(observation))
 
         # Get reward for the predicted state
         reward = self.get_reward(predicted_state)
 
         # Update observation history for rendering
-        if len(samples) > 0:
-            self.observation_history.append(samples[0])  # Store first sample as observation
+        self.observation_history.extend(int(o) for o in observations)
 
-        # Note: max_steps check removed as it's handled by the gym adapter
+        # No terminal state: the task is prediction at every step, so the
+        # horizon comes from the gym registration's max_episode_steps.
         terminated = False
         truncated = False
 
-        if not hasattr(self, 'step_count'):
-            self.step_count = 0
         self.step_count += 1
 
-        # Convert particles to float32 for observation space
-        obs = self.particles.astype(np.float32)
+        if self.true_particles:
+            emitted = observations
+        else:
+            # Diagnostic oracle-belief mode: emit a sample from the env's own
+            # posterior instead of raw observations. This is the only correct
+            # reading of what the old resampling branch was reaching for -- it
+            # called rng.choice(p=1-weights) on something that is not a
+            # distribution, wrote float draws into an integer array, and built
+            # a Gaussian whose scale is 0 whenever every draw agrees. Sampling
+            # the exact posterior is the same idea done as a valid operation.
+            emitted = self.get_particle_set(self.obs_per_step)
+        obs = np.asarray(emitted, dtype=np.float32)
 
         # Compute normalized reward between theoretical min and max
         min_reward, max_reward = self.get_reward_bounds()
@@ -197,12 +280,37 @@ class OddEvenPOMDP(gym.Env):
             'reward_min': min_reward,
             'reward_max': max_reward,
             'reward_normalized': float(normalized_reward),
+            'step_count': self.step_count,
+            'observations': np.asarray(observations, dtype=np.int64),
+            # The posterior travels in info, NOT in the observation: the
+            # agent has to earn it through its own belief encoder. It is here
+            # so probe labels and the greedy-argmax oracle can read the exact
+            # belief that the encoder arms are being compared against.
+            'belief': self.belief.copy(),
+            'belief_points': self.belief_points.copy(),
+            'optimal_prediction': self.get_optimal_prediction(),
+            'max_likelihood_prediction': self.get_max_likelihood_prediction(),
         }
 
         return obs, reward, terminated, truncated, info
-    def _init_particle_set(self):
-        """Initialize particle set for mode estimation"""
-        return self.rng.rand(self.n_particles) * self.n_dist_size
+
+    def _draw_observations(self, count: int) -> np.ndarray:
+        """Draw `count` i.i.d. observations from the true observation model."""
+        return self.rng.choice(
+            self.valid_numbers, p=self.observation_probs, size=int(count))
+
+    def get_particle_set(self, num_particles: int) -> np.ndarray:
+        """Sample candidate states from the CURRENT belief.
+
+        A weighted posterior turned into an unweighted sample. Used by
+        run_example(), and by the true_particles=False observation mode.
+        Note that a particle filter for this env should carry the mass in the
+        weights instead: at n_dist_size=50 the posterior's effective sample
+        size falls to about 1 of 50, so an unweighted sample throws away
+        nearly all of the belief's resolution.
+        """
+        return self.rng.choice(
+            self.belief_points, p=self.belief, size=int(num_particles))
 
     def _compute_probabilities(self):
         """Pre-compute the true observation-generating distribution for true_state's parity"""
@@ -240,32 +348,50 @@ class OddEvenPOMDP(gym.Env):
 
     def get_reward(self, predicted_state: int) -> float:
         """
-        Get reward for predicting true_state.
+        Get reward for predicting true_state: 1.0 for an exact hit, else 0.0.
+
+        WHY THIS AND NOT SQUARED ERROR. The old reward was -(pred - s*)^2.
+        Under it the expected reward of action a is
+
+            E[R | a] = -sum_s p(s) (a - s)^2 = -(a - mu)^2 - sigma^2
+
+        and the sigma^2 term does not depend on a. So the optimal action was
+        round(mu) and NOTHING about the belief beyond its first moment could
+        change the decision -- verified exhaustively: over 12,400 beliefs
+        round(mu) was the argmax action 1.0000 of the time, losing 0.0 reward.
+        That made a mean+variance encoding Bayes-optimal and left a richer
+        belief encoder (CGF, Set Transformer, Deep Sets) no room to win, which
+        is exactly what the 3M-step runs showed -- CGF and Gaussian tied to
+        within seed noise. The domain's multimodal same-parity comb was real;
+        the scoring rule simply discarded it.
+
+        Under 0/1 exact match the optimal action is the posterior MODE, so the
+        decision depends on where the mass actually sits. On the same 12,400
+        beliefs round(mu) is the WRONG action 33.7% of the time and gives up
+        0.186 hit-probability on average (worst case 0.756). That is the room
+        a belief encoder needs in order to be measurable.
 
         Args:
             predicted_state: The predicted state value (integer)
 
         Returns:
-            float: Negative squared error as reward
+            float: 1.0 if predicted_state == true_state, else 0.0
         """
-        error = predicted_state - self.true_state
-        return -error ** 2  # Negative squared error (higher reward for better predictions)
+        return 1.0 if int(predicted_state) == int(self.true_state) else 0.0
 
     def get_reward_bounds(self) -> Tuple[float, float]:
         """
         Get theoretical minimum and maximum possible reward.
 
-        Reward is defined as - (predicted_state - true_state)^2 with true_state in [1, n_dist_size]
-        and predictions also in [1, n_dist_size]. The best possible reward is 0 (perfect prediction),
-        and the worst is when prediction and true state are at opposite ends of the range.
+        Reward is 0/1 exact match, so the bounds do not depend on n_dist_size:
+        0.0 for any miss and 1.0 for a hit. `reward_normalized` in info is
+        therefore the same number as the raw reward here, which is intended --
+        it is kept so the info key does not change shape for consumers.
 
         Returns:
             Tuple[float, float]: (min_reward, max_reward)
         """
-        max_reward = 0.0
-        # Maximum squared error occurs between 1 and n_dist_size: (n_dist_size - 1)^2
-        min_reward = -float((self.n_dist_size - 1) ** 2)
-        return min_reward, max_reward
+        return 0.0, 1.0
 
     def _compute_observation_probability(self, observation: int, candidate_state: int) -> float:
         """
@@ -336,15 +462,26 @@ class OddEvenPOMDP(gym.Env):
 
     def get_optimal_prediction(self) -> int:
         """
-        Get the optimal state prediction given current belief state.
-        Returns the expected value rounded to nearest integer.
+        Get the Bayes-optimal state prediction under the CURRENT reward.
+
+        The reward is 0/1 exact match, so E[R | a] = p(a) and the optimal
+        action is the posterior MODE. This used to return the rounded
+        posterior mean, which was optimal under the old squared-error reward
+        and is wrong here -- on this domain the rounded mean differs from the
+        mode in 33.7% of beliefs, so an oracle built on it would be beatable
+        by a third of its own decisions and would understate the ceiling every
+        encoder arm is measured against.
+
+        This is now the same quantity as get_max_likelihood_prediction(). Both
+        names are kept: callers ask for "the best action" and "the MAP state"
+        for different reasons, and they would diverge again if the reward
+        changed. Whenever get_reward() changes, THIS function must be
+        re-derived with it.
 
         Returns:
-            int: Optimal state prediction (expected value rounded to nearest integer)
+            int: argmax_s P(s | observations)
         """
-        expected_value = np.sum(self.belief_points * self.belief)
-        # Round to nearest integer in valid numbers
-        return int(self.belief_points[np.argmin(np.abs(self.belief_points - expected_value))])
+        return int(self.belief_points[np.argmax(self.belief)])
 
     def get_max_likelihood_prediction(self) -> int:
         """
@@ -365,19 +502,26 @@ class OddEvenPOMDP(gym.Env):
             options: Optional dict with reset options
 
         Returns:
-            Tuple[np.ndarray, dict]: Observation (particles) and info dict
+            Tuple[np.ndarray, dict]: Observation and info dict
         """
+        # This reseeds self.np_random -- and therefore self.rng -- whenever a
+        # seed is given. The hidden state is drawn below, so reset(seed=k)
+        # replays episode k byte for byte. That is correct, and it is the trap
+        # this env sets: an eval loop that passes one constant seed to every
+        # reset measures a single episode N times.
         super().reset(seed=seed)
-
-        if seed is not None:
-            self.rng = np.random.RandomState(seed)
 
         # valid_nums: every integer true_state could possibly be, 1..n_dist_size
         valid_nums = np.arange(1, self.n_dist_size + 1)
 
         # Resample true_state each episode unless a fixed value was configured.
+        # The else mirrors __init__: without it a value pinned AFTER
+        # construction (e.g. by a visualisation that wants to watch a chosen
+        # state) was silently ignored and the previous episode's state reused.
         if self.config.true_state is None:
             self.true_state = int(self.rng.choice(valid_nums))
+        else:
+            self.true_state = int(self.config.true_state)
 
         # Clear observation history
         self.observation_history = []
@@ -385,20 +529,42 @@ class OddEvenPOMDP(gym.Env):
         # Recompute the true observation-generating probabilities for the new episode
         self._compute_probabilities()
 
-        # Fresh uniform belief over ALL valid integers for the new episode --
+        # Fresh uniform PRIOR over ALL valid integers for the new episode --
         # independent of the new episode's (unknown-to-the-agent) true_state.
+        # The reset observation below turns it into the posterior b0.
         self.belief_points = np.arange(1, self.n_dist_size + 1)
         self.belief = np.ones(len(self.belief_points)) / len(self.belief_points)
         self.step_count = 0
 
-        # Initialize particles
-        particles = self.rng.choice(self.valid_numbers, p=self.observation_probs, size=self.n_particles)
-        self.particles = particles
+        # b0 = P(s | o0), the standard POMDP convention -- and here an
+        # expensive one to get wrong. This observation used to be returned and
+        # then thrown away, leaving the prior uniform: a T-step episode drew
+        # T + 1 observations and used T, and the wasted one was the only thing
+        # that could inform the FIRST action. At n_dist_size=50 over a 50-step
+        # cap, step 1 alone accounts for 81% of the optimal policy's pooled
+        # mean reward, so the headline metric was 81% decided by a step at
+        # which no belief encoder had any information at all -- measured, the
+        # optimal policy scores -4.956 per step with o0 discarded against
+        # -0.941 with it folded in.
+        #
+        # Any particle filter for this env MUST consume its initial_env_obs
+        # the same way, or its belief sits one update behind the env's with no
+        # error raised. OddEven{ExactSupport,Bootstrap}ParticleFilter do.
+        observations = self._draw_observations(self.obs_per_step)
+        for observation in observations:
+            self.update_belief(int(observation))
 
-        # Convert to float32 for observation space
-        obs = particles.astype(np.float32)
+        emitted = (observations if self.true_particles
+                   else self.get_particle_set(self.obs_per_step))
+        obs = np.asarray(emitted, dtype=np.float32)
         info = {
             'true_state': self.true_state,
+            'step_count': self.step_count,
+            'observations': np.asarray(observations, dtype=np.int64),
+            'belief': self.belief.copy(),
+            'belief_points': self.belief_points.copy(),
+            'optimal_prediction': self.get_optimal_prediction(),
+            'max_likelihood_prediction': self.get_max_likelihood_prediction(),
         }
 
         return obs, info
@@ -412,6 +578,7 @@ class OddEvenPOMDP(gym.Env):
         """
         return {
             'n_dist_size': self.n_dist_size,
+            'obs_per_step': self.obs_per_step,
             'true_state': self.true_state,
             'std_dev': self.std_dev,
             'sigma_divisor': self.sigma_divisor,
@@ -527,6 +694,17 @@ Ground Truth:
         else:
             plt.close(fig)
             return None
+
+
+def make_odd_even_pomdp(**kwargs) -> OddEvenPOMDP:
+    """gymnasium entry point for the registered Odd-Even ids.
+
+    OddEvenPOMDP.__init__ takes a single config object, while gym.make()
+    forwards keyword arguments, so the registration needs this shim. Every
+    OddEvenPOMDPConfig field is therefore settable as a registration kwarg
+    or a gym.make() kwarg.
+    """
+    return OddEvenPOMDP(OddEvenPOMDPConfig(**kwargs))
 
 
 def visualize_particles(pomdp, particles: List[int], step: int):

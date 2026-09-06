@@ -16,12 +16,20 @@ class AntTagEnv(gym.Env):
 
     def __init__(self, seed=None, num_frames_skip=15, rendering=False,
                  model_name: str = "ant_tag_small.xml",
-                 cage_max: float = 4.5):
+                 cage_max: float = 4.5,
+                 visible_radius: float = 3.0,
+                 tag_radius: float = 1.5):
         """`model_name` / `cage_max` are keyword-only in practice and default
         to the historical hardcoded values, so every existing caller is
         unaffected. They exist so arena-scaled variants (e.g.
         CounterweightedDenAntTagEnv, which needs the 14x14
-        ``ant_tag_large.xml``) can reuse this constructor verbatim."""
+        ``ant_tag_large.xml``) can reuse this constructor verbatim.
+
+        `visible_radius` / `tag_radius` likewise default to the historical
+        3.0 / 1.5. They are constructor arguments so a registration can
+        tighten the sensing/tagging geometry (``pdomains-ant-tag-smart-hard-v0``
+        uses 1.0 / 0.6) without a subclass, and the rendered range-marker
+        sites in the MuJoCo asset are resized to match."""
 
         initial_joint_pos = np.array([0, 0, 0.55, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0])
         initial_joint_pos = np.reshape(initial_joint_pos,(len(initial_joint_pos),1))
@@ -73,12 +81,37 @@ class AntTagEnv(gym.Env):
             dtype=np.float32            
         )
 
-        self.visible_radius = 3.0
-        self.tag_radius = 1.5
+        if not tag_radius > 0.0:
+            raise ValueError("tag_radius must be positive")
+        if not visible_radius > tag_radius:
+            raise ValueError(
+                "visible_radius must exceed tag_radius (urgency formula "
+                "divides by their difference)")
+        self.visible_radius = float(visible_radius)
+        self.tag_radius = float(tag_radius)
+        self._sync_range_marker_sites()
         self.min_distance = 5.0
         self.target_step = 0.5
 
         self.seed(seed)
+
+    def _sync_range_marker_sites(self) -> None:
+        """Resize the asset's rendered visibility/tag discs to the live radii.
+
+        The ``visible_area`` / ``tag_area`` mocap bodies are visual only and
+        carry no game logic; this keeps renders honest when a variant
+        changes the radii away from the values baked into the XML."""
+        for body_name, radius in (
+                ("visible_area", self.visible_radius),
+                ("tag_area", self.tag_radius)):
+            body_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            site_ids = np.flatnonzero(self.model.site_bodyid == body_id)
+            if site_ids.size != 1:
+                raise RuntimeError(
+                    f"Expected exactly one site on {body_name!r}, found "
+                    f"{site_ids.size}")
+            self.model.site_size[site_ids[0], 0] = radius
 
     # Get state, which concatenates joint positions and velocities
     def _get_obs(self, target_pos_visible):
@@ -475,17 +508,15 @@ class CounterweightedDenAntTagEnv(SmartAntTagEnv):
     def __init__(self, *args, cden_h: float = 2.4, cden_f: float = 6.75,
                  cden_r: float = 0.4, spook: bool = True,
                  spook_radius: float = 2.2, ant_clearance: float = 2.7,
-                 visible_radius: float = 1.8, **kwargs):
+                 visible_radius: float = 1.8, tag_radius: float = 1.5,
+                 **kwargs):
+        # Radii validation and the range-marker site resize live in AntTagEnv.
         super().__init__(*args, model_name="ant_tag_large.xml",
-                         cage_max=7.0, **kwargs)
+                         cage_max=7.0, visible_radius=visible_radius,
+                         tag_radius=tag_radius, **kwargs)
         if not np.isclose(self.target_speed_scale, 0.0):
             raise ValueError(
                 "CounterweightedDenAntTagEnv requires target_speed_scale == 0.0")
-        if not visible_radius > self.tag_radius:
-            raise ValueError(
-                "visible_radius must exceed tag_radius (urgency formula "
-                "divides by their difference)")
-        self.visible_radius = float(visible_radius)
         self.cden_h, self.cden_f, self.cden_r = (
             float(cden_h), float(cden_f), float(cden_r))
         # Mean-pinning is an EQUATION, not a tuned number: w*h == (1-w)*f.
@@ -618,4 +649,133 @@ class CounterweightedDenAntTagEnv(SmartAntTagEnv):
         info["cden_heavy_side"] = self.cden_heavy_side
         info["cden_occupied"] = "heavy" if self._occupied_is_heavy else "light"
         info["cden_spooked"] = self.cden_spooked
+        return obs, reward, terminated, truncated, info
+
+
+class TerminalPhantomCounterweightedDenAntTagEnv(
+        CounterweightedDenAntTagEnv):
+    """Counterweighted dens with an irreversible arrangement commitment.
+
+    Each episode activates one of the two mirrored den arrangements.  The
+    active heavy and light dens retain positive prior mass; the heavy and
+    light candidates belonging to the *inactive* arrangement are phantom
+    terminal regions.  Entering either phantom region ends the episode with
+    ``phantom_penalty``.  The trigger radius defaults to the earliest possible
+    visual-overlap distance (``visible_radius + cden_r``), preventing a policy
+    from safely probing a zero-mass candidate and then redirecting.
+
+    The ant starts in a small centered disc.  Besides making the two
+    arrangements exactly symmetric from the physical observation, this keeps
+    a direct commitment to the active heavy den from crossing a phantom merely
+    because the ant happened to spawn on the far side of the arena.  Because
+    mean-pinning places the active light den beyond the mirrored heavy point,
+    a direct light-den route crosses that phantom circle and must detour; this
+    is an intentional consequence of making both inactive candidates hazards.
+
+    ``info["is_success"]`` distinguishes a real tag from a phantom terminal.
+    The phantom locations and hit labels in ``info`` are diagnostic ground
+    truth only; the PF interaction mapper does not forward them to the policy.
+    """
+
+    def __init__(self, *args, phantom_terminal_radius: float | None = None,
+                 phantom_penalty: float = -300.0,
+                 central_spawn_radius: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        if phantom_terminal_radius is None:
+            phantom_terminal_radius = self.visible_radius + self.cden_r
+        if phantom_terminal_radius <= 0.0:
+            raise ValueError("phantom_terminal_radius must be positive")
+        if central_spawn_radius < 0.0:
+            raise ValueError("central_spawn_radius must be non-negative")
+
+        self.phantom_terminal_radius = float(phantom_terminal_radius)
+        self.phantom_penalty = float(phantom_penalty)
+        self.central_spawn_radius = float(central_spawn_radius)
+
+        # The nearest phantom is a heavy candidate at radial distance h.
+        # Every allowed spawn must begin strictly outside its terminal zone.
+        if self.central_spawn_radius + self.phantom_terminal_radius >= self.cden_h:
+            raise ValueError(
+                "central spawn disc overlaps a phantom terminal region: "
+                "central_spawn_radius + phantom_terminal_radius must be "
+                "smaller than cden_h")
+        # Also keep the nearest possible target outside the physical sensor at
+        # reset; otherwise target visibility could leak occupancy immediately.
+        if (self.central_spawn_radius + self.cden_r + self.visible_radius
+                >= self.cden_h):
+            raise ValueError(
+                "central spawn can initially see a target in the heavy den: "
+                "central_spawn_radius + cden_r + visible_radius must be "
+                "smaller than cden_h")
+
+        self.cden_phantom_positions = np.stack([
+            -self.cden_heavy_pos,
+            -self.cden_light_pos,
+        ])
+
+    def reset(self, seed=None, options=None):
+        obs, info = super().reset(seed=seed, options=options)
+
+        # The inactive arrangement is the point reflection of the active one.
+        # Order: [phantom heavy, phantom light].
+        self.cden_phantom_positions = np.stack([
+            -self.cden_heavy_pos,
+            -self.cden_light_pos,
+        ])
+
+        rr = self.central_spawn_radius * np.sqrt(self.np_random.random())
+        th = self.np_random.uniform(0.0, 2.0 * np.pi)
+        ant_pos = rr * np.array([np.cos(th), np.sin(th)])
+        self.data.qpos[:2] = ant_pos
+        self.data.mocap_pos[1][:2] = ant_pos
+        self.data.mocap_pos[2][:2] = ant_pos
+        mujoco.mj_forward(self.model, self.data)
+
+        info.update({
+            "cden_heavy_side": self.cden_heavy_side,
+            "cden_occupied": (
+                "heavy" if self._occupied_is_heavy else "light"),
+            "cden_phantom_positions": self.cden_phantom_positions.copy(),
+            "cden_phantom_hit": False,
+            "cden_phantom_index": None,
+            "termination_reason": None,
+            "is_success": False,
+        })
+        return self._get_obs(False), info
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+
+        ant_pos = self.data.qpos[:2]
+        phantom_distances = np.linalg.norm(
+            self.cden_phantom_positions - ant_pos[None, :], axis=1)
+        phantom_index = int(np.argmin(phantom_distances))
+        phantom_hit = bool(
+            not terminated
+            and phantom_distances[phantom_index]
+            < self.phantom_terminal_radius)
+
+        if phantom_hit:
+            terminated = True
+            reward = self.phantom_penalty
+            termination_reason = "phantom_den"
+            is_success = False
+        elif terminated:
+            # CounterweightedDenAntTagEnv has no non-tag terminal condition.
+            termination_reason = "tag"
+            is_success = True
+            phantom_index = None
+        else:
+            termination_reason = None
+            is_success = False
+            phantom_index = None
+
+        info.update({
+            "cden_phantom_positions": self.cden_phantom_positions.copy(),
+            "cden_phantom_hit": phantom_hit,
+            "cden_phantom_index": phantom_index,
+            "cden_phantom_min_distance": float(np.min(phantom_distances)),
+            "termination_reason": termination_reason,
+            "is_success": is_success,
+        })
         return obs, reward, terminated, truncated, info
