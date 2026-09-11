@@ -46,6 +46,37 @@ register(
     },
 )
 
+# Geometry sweep around smart-hard (2026-09-05). The fully-observed PPO ceiling
+# on smart-hard is only 15-42% at 3M steps: a 0.6 tag radius against a target
+# stepping 0.5 is a hard chase even with perfect information. These three
+# relax the chase along the two available axes while keeping the target
+# partially observed (visible 2.0 on the 9x9 cage is still only ~16% of the
+# arena). Same class, same cap; kwargs only.
+register(  # bigger radii, same target speed
+    id='pdomains-ant-tag-smart-mid-v0',
+    entry_point='pdomains.ant_tag:SmartAntTagEnv',
+    max_episode_steps=400,
+    kwargs={'tag_radius': 1.0, 'visible_radius': 2.0},
+)
+register(  # smart-hard radii, slower target
+    id='pdomains-ant-tag-smart-hard-slow-v0',
+    entry_point='pdomains.ant_tag:SmartAntTagEnv',
+    max_episode_steps=400,
+    kwargs={'tag_radius': 0.6, 'visible_radius': 1.0, 'target_step': 0.3},
+)
+register(  # both
+    id='pdomains-ant-tag-smart-mid-slow-v0',
+    entry_point='pdomains.ant_tag:SmartAntTagEnv',
+    max_episode_steps=400,
+    kwargs={'tag_radius': 1.0, 'visible_radius': 2.0, 'target_step': 0.3},
+)
+register(  # smart-mid-slow with a tighter visible radius (8.7% of the cage)
+    id='pdomains-ant-tag-smart-mid-slow-v15-v0',
+    entry_point='pdomains.ant_tag:SmartAntTagEnv',
+    max_episode_steps=400,
+    kwargs={'tag_radius': 1.0, 'visible_radius': 1.5, 'target_step': 0.3},
+)
+
 register(
     id='pdomains-ant-tag-ghost-v0',
     entry_point='pdomains.ant_tag:GhostAntTagEnv',

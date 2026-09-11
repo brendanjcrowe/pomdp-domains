@@ -18,7 +18,8 @@ class AntTagEnv(gym.Env):
                  model_name: str = "ant_tag_small.xml",
                  cage_max: float = 4.5,
                  visible_radius: float = 3.0,
-                 tag_radius: float = 1.5):
+                 tag_radius: float = 1.5,
+                 target_step: float = 0.5):
         """`model_name` / `cage_max` are keyword-only in practice and default
         to the historical hardcoded values, so every existing caller is
         unaffected. They exist so arena-scaled variants (e.g.
@@ -29,7 +30,9 @@ class AntTagEnv(gym.Env):
         3.0 / 1.5. They are constructor arguments so a registration can
         tighten the sensing/tagging geometry (``pdomains-ant-tag-smart-hard-v0``
         uses 1.0 / 0.6) without a subclass, and the rendered range-marker
-        sites in the MuJoCo asset are resized to match."""
+        sites in the MuJoCo asset are resized to match. `target_step` (the
+        target's per-step displacement, historically 0.5) is exposed for the
+        same reason; the particle filters read it off the live env."""
 
         initial_joint_pos = np.array([0, 0, 0.55, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, -1.0, 0.0, 1.0])
         initial_joint_pos = np.reshape(initial_joint_pos,(len(initial_joint_pos),1))
@@ -91,7 +94,9 @@ class AntTagEnv(gym.Env):
         self.tag_radius = float(tag_radius)
         self._sync_range_marker_sites()
         self.min_distance = 5.0
-        self.target_step = 0.5
+        if not target_step > 0.0:
+            raise ValueError("target_step must be positive")
+        self.target_step = float(target_step)
 
         self.seed(seed)
 
