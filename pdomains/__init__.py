@@ -245,3 +245,11 @@ register(  # the widest cluster is the target; widths in [0.30, 0.90], unique by
     max_episode_steps=60,
     kwargs=dict(target_rule="max_var", sigma_hi=0.9, sigma_margin=0.2),
 )
+
+# Multimodal Search (2026-09-13): moved from set_transformer/rl/envs/multimodal_search.py (see
+# pdomains/multimodal_search.py). Default configuration; the env truncates itself at max_steps = 42.
+register(
+    id='pdomains-multimodal-search-v0',
+    entry_point='pdomains.multimodal_search:make_env',
+    max_episode_steps=42,
+)
