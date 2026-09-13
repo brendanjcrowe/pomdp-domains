@@ -219,3 +219,29 @@ register(
     max_episode_steps=30,
     kwargs={'n_dist_size': 50, 'obs_per_step': 1},
 )
+
+# ---------------------------------------------------------------------------------------------
+# Hunt tasks (2026-09-13): Cluster-Hunt, least-mass and most-var, moved from the parent repo's
+# src/hunt_tasks/env/ (see pdomains/hunt.py). Each env truncates itself at max_steps = 60, and
+# the registration cap says the same so the harness reads it off gym.spec().
+# ---------------------------------------------------------------------------------------------
+register(
+    id='pdomains-cluster-hunt-v0',
+    entry_point='pdomains.hunt:ClusterHuntEnv',
+    max_episode_steps=60,
+    # The recorded RL configuration (src/hunt_tasks/train.py defaults; cluster_hunt.md sec. 7).
+    kwargs=dict(hit_radius=0.6, min_sep=2.5, max_steps=60),
+)
+
+register(
+    id='pdomains-least-mass-v0',
+    entry_point='pdomains.hunt:MinMassHuntEnv',
+    max_episode_steps=60,
+)
+
+register(  # the widest cluster is the target; widths in [0.30, 0.90], unique by a 0.2 margin
+    id='pdomains-most-var-v0',
+    entry_point='pdomains.hunt:MinMassHuntEnv',
+    max_episode_steps=60,
+    kwargs=dict(target_rule="max_var", sigma_hi=0.9, sigma_margin=0.2),
+)
