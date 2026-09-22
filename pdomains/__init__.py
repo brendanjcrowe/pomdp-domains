@@ -237,6 +237,12 @@ register(
     id='pdomains-least-mass-v0',
     entry_point='pdomains.hunt:MinMassHuntEnv',
     max_episode_steps=60,
+    # The recorded RL configuration: every DAgger round in the record ran with a timeout penalty of
+    # 40 (src/hunt_tasks/pretrain/dagger.py --timeout_penalty default 40.0, passed into
+    # minmass.train_rl). The dataclass default is 20; the registration was ported without it, so
+    # every least_mass run before 2026-09-18 (lm_pre, h2d_bare) trained at 20. The env SUBTRACTS this
+    # value on timeout (hunt.py, `reward -= c.timeout_penalty`), so 40.0 here means a reward of -40.
+    kwargs=dict(timeout_penalty=40.0),
 )
 
 register(  # the widest cluster is the target; widths in [0.30, 0.90], unique by a 0.2 margin
