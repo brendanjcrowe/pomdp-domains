@@ -253,3 +253,14 @@ register(
     entry_point='pdomains.multimodal_search:make_env',
     max_episode_steps=42,
 )
+
+# Light-Dark 1D (2026-09-19): Python port of LightDark1D from POMDPs.jl (see
+# pdomains/light_dark.py). Defaults are the Julia LightDark1D() constructor. The episode
+# cap lives here: the env itself never truncates, matching the unbounded Julia problem.
+# 50 steps is comfortably above the ~15 an optimal detour (localise at the light at y=5,
+# return to the goal at y=0, declare) needs from y0 ~ N(2, 3).
+register(
+    id='pdomains-light-dark-1d-v0',
+    entry_point='pdomains.light_dark:make_env',
+    max_episode_steps=50,
+)
