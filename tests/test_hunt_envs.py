@@ -73,10 +73,17 @@ def test_moved_envs_are_bit_identical_to_the_originals(seed):
         a = _rollout(new_cls(**kw), seed, 60, np.random.default_rng(100 + seed))
         b = _rollout(old_cls(**kw), seed, 60, np.random.default_rng(100 + seed))
         _assert_same(a, b)
-    # the registered env (through TimeLimit) plays the same episode as the bare class
+    # The registered env (through TimeLimit) plays the same episode as the bare class. The
+    # registration is what the cell is compared against, so the bare class is given the
+    # registration's OWN kwargs: since 2026-09-18 (pomdp-domains 29a2297) least-mass registers
+    # timeout_penalty=40.0 -- the value every DAgger round in the record used -- while the
+    # dataclass default is 20.0. Without this the two differ by exactly 20 on any episode that
+    # times out, which is what this test asserted away for three days. This line compares the
+    # WRAPPER, not the config, so it must not re-assert the config.
     reg = gym.make("pdomains-least-mass-v0")
     a = _rollout(reg, seed, 60, np.random.default_rng(seed))
-    b = _rollout(orig_mm.MinMassHuntEnv(), seed, 60, np.random.default_rng(seed))
+    b = _rollout(orig_mm.MinMassHuntEnv(**dict(gym.spec("pdomains-least-mass-v0").kwargs)),
+                 seed, 60, np.random.default_rng(seed))
     _assert_same(a, b)
 
 
